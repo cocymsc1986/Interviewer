@@ -55,16 +55,88 @@ export const systemDesignProblems = [
       { section: 'Media Handling', content: 'Images/videos go to blob storage (S3). URLs stored with tweet. CDN serves media. Thumbnail generation is async via a queue.' },
       { section: 'Observability', content: 'Key metrics: tweet write latency P99, timeline read latency P99, fan-out queue depth (alert if >1M backlog), cache hit ratio (alert if <70%). Distributed tracing (Jaeger/Zipkin) on the tweet-write and feed-read paths. Dashboard: tweets/sec, active WebSocket connections, Redis memory utilization.' },
     ],
-    diagram: `graph TD
-    User -->|POST tweet| API[API Gateway]
-    API --> TweetSvc[Tweet Service]
-    TweetSvc --> DB[(Cassandra)]
-    TweetSvc --> FanOut[Fan-out Service]
-    FanOut --> Redis[(Timeline Cache\nRedis)]
-    User -->|GET timeline| API
-    API --> FeedSvc[Feed Service]
-    FeedSvc --> Redis
-    FeedSvc -->|celebrity merge| DB`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web App]
+        Mobile[Mobile App]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth Service]
+        RL[Rate Limiter]
+    end
+    subgraph Services
+        Tweet[Tweet Service]
+        Timeline[Timeline Service]
+        UserSvc[User Profile Svc]
+        FollowSvc[Follow Graph Svc]
+        SearchSvc[Search Service]
+        Trends[Trends Service]
+        DM[Direct Message Svc]
+        NotifSvc[Notification Service]
+        MediaSvc[Media Service]
+    end
+    subgraph Async
+        FanoutQ[Fan-out Queue]
+        FanoutW[Fan-out Workers]
+        MediaProc[Media Processor]
+        Indexer[Search Indexer]
+        TrendsJob[Trends Aggregator]
+    end
+    subgraph Storage
+        TweetDB[(Tweets Cassandra)]
+        TLCache[(Timeline Cache Redis)]
+        GraphDB[(Follow Graph DB)]
+        UserDB[(User DB)]
+        ES[(Elasticsearch)]
+        DMDB[(DM Cassandra)]
+        MediaS3[(Media S3 and CDN)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+    end
+
+    Web -->|POST tweet| APIGW
+    Mobile -->|POST tweet| APIGW
+    APIGW --> Auth
+    APIGW --> RL
+    APIGW --> Tweet
+    Tweet --> TweetDB
+    Tweet -->|media refs| MediaS3
+    Tweet -->|fan-out msg| FanoutQ --> FanoutW
+    FanoutW -->|push tweet_id| TLCache
+    FanoutW -->|celebrity skip| TweetDB
+    Tweet --> EventBus
+    EventBus --> Indexer --> ES
+    EventBus --> Lake
+    EventBus --> TrendsJob --> Trends
+
+    Web -->|media upload| MediaSvc --> MediaS3
+    MediaS3 -->|event| MediaProc --> MediaS3
+
+    Mobile -->|GET timeline| APIGW --> Timeline
+    Timeline --> TLCache
+    Timeline -->|celebrity merge| TweetDB
+    Timeline -->|hydrate| Tweet
+
+    Web -->|search query| APIGW --> SearchSvc --> ES
+    Web -->|trends| APIGW --> Trends
+
+    Web -->|follow| APIGW --> FollowSvc --> GraphDB
+    FollowSvc --> NotifSvc --> Mobile
+
+    Mobile -->|send DM| APIGW --> DM --> DMDB
+    DM --> NotifSvc
+
+    APIGW --> UserSvc --> UserDB
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class TweetDB,TLCache,GraphDB,UserDB,ES,DMDB,MediaS3 storage
+    class FanoutQ,FanoutW,MediaProc,Indexer,TrendsJob async
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Fan-out on write vs read', rationale: 'Fan-out on write gives fast reads but is expensive for celebrities. Hybrid approach: fan-out on write for regular users, fan-out on read for celebrities.' },
     ],
@@ -193,15 +265,97 @@ export const systemDesignProblems = [
       { section: 'Metadata & Search', content: 'Video metadata (title, description, tags, view count) stored in Cassandra. Full-text search via Elasticsearch. View counts use Redis counters flushed to DB asynchronously.' },
       { section: 'Observability', content: 'Key metrics: transcoding job queue depth and P99 processing time, CDN cache hit ratio per region (alert if <85%), playback error rate, buffering ratio per bitrate tier. Alerts: transcoding worker failures, CDN origin error spikes. Use a metrics pipeline (Prometheus → Grafana) and structured logs (ELK stack) for upload and playback events.' },
     ],
-    diagram: `graph TD
-    Uploader -->|video file| Edge[Edge Upload Server]
-    Edge --> S3[(Raw Storage S3)]
-    S3 -->|trigger| Queue[Transcoding Queue]
-    Queue --> Workers[Transcoder Workers]
-    Workers -->|segments| S3CDN[(Encoded S3)]
-    S3CDN --> CDN[CDN Edge Nodes]
-    Viewer -->|manifest| CDN
-    CDN -->|segments| Viewer`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web Player]
+        Mobile[Mobile App]
+        TV[TV / Console]
+    end
+    subgraph Edge
+        GeoDNS[Geo-DNS]
+        CDN[CDN Edge PoPs]
+        EdgeUp[Edge Upload Servers]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth and OAuth]
+    end
+    subgraph Services
+        Upload[Upload Service]
+        Playback[Playback Service]
+        Meta[Video Metadata Service]
+        Search[Search Service]
+        Recs[Recommendation Service]
+        Comments[Comments Service]
+        Subs[Channels and Subscriptions]
+        Notif[Notification Service]
+        Views[View Counter]
+        Ads[Ads and Monetization]
+        Mod[Content Moderation]
+    end
+    subgraph Async [Async Pipelines]
+        TQ[Transcoding Queue]
+        Workers[Transcoder Workers]
+        Thumbs[Thumbnail Generator]
+        CID[Content ID Scanner]
+        Trainer[Rec Model Training]
+    end
+    subgraph Storage
+        Raw[(Raw Video S3)]
+        Enc[(Encoded Segments and HLS Manifests)]
+        MetaDB[(Video Metadata Cassandra)]
+        ES[(Elasticsearch)]
+        Counter[(Redis View Counter)]
+        CommentDB[(Comments DB)]
+        UserDB[(User and Subs DB)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Event Bus]
+        Lake[(Data Lake S3)]
+        Feature[Feature Store]
+    end
+
+    Web -->|request presigned URL| APIGW
+    APIGW --> Auth
+    APIGW --> Upload
+    Upload -->|presigned PUT| Web
+    Web -->|chunked upload| EdgeUp --> Raw
+    Raw -->|object event| TQ --> Workers
+    Workers --> Enc
+    Workers --> Thumbs --> Enc
+    Workers --> CID --> Mod
+    Workers --> Meta
+    Meta --> MetaDB
+    Meta --> ES
+
+    Mobile -->|DNS lookup| GeoDNS
+    Mobile -->|watch page| APIGW
+    APIGW --> Playback
+    Playback --> Meta
+    Playback --> Counter
+    Playback --> Ads
+    Mobile -->|manifest and segments| CDN
+    CDN -->|origin miss| Enc
+    Mobile -->|view event| EventBus
+
+    TV -->|query| APIGW --> Search --> ES
+    Mobile -->|home feed| Recs
+    Recs --> Feature
+    EventBus --> Lake --> Trainer --> Feature
+
+    Web -->|comment and like| APIGW
+    APIGW --> Comments --> CommentDB
+    APIGW --> Subs --> UserDB
+    Subs --> Notif --> Mobile
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class Raw,Enc,MetaDB,ES,Counter,CommentDB,UserDB storage
+    class TQ,Workers,Thumbs,CID,Trainer async
+    class GeoDNS,CDN,EdgeUp edge
+    class EventBus,Lake,Feature analytics`,
     tradeoffs: [
       { decision: 'Pre-split vs on-the-fly transcoding', rationale: 'Pre-transcoding all resolutions costs storage but guarantees instant playback. On-the-fly transcoding saves storage but adds latency and requires powerful edge servers.' },
     ],
@@ -261,15 +415,87 @@ export const systemDesignProblems = [
       { section: 'Recommendation Engine', content: 'Collaborative filtering on viewing history. A/B tested constantly. Model trained offline on Spark, served online via a feature store. Thumbnail personalization: different users see different cover images for the same show.' },
       { section: 'Playback State', content: 'Resume position stored in Cassandra keyed by (user_id, content_id). Synced across devices. Last write wins for concurrent sessions.' },
     ],
-    diagram: `graph LR
-    User -->|browse| API[API Gateway]
-    API --> Catalog[Catalog Service]
-    API --> Rec[Recommendation Service]
-    User -->|play request| Playback[Playback Service]
-    Playback -->|CDN URL| User
-    User -->|stream| CDN[Open Connect CDN]
-    CDN -->|miss| S3[(Content Store)]
-    ViewState[View State\nCassandra] -->|resume pos| Playback`,
+    diagram: `graph TB
+    subgraph Clients
+        TV[TV App]
+        Mobile[Mobile App]
+        Web[Web Player]
+    end
+    subgraph Edge
+        GeoDNS[Geo-DNS]
+        OC[Open Connect ISP Appliances]
+        Origin[Origin CDN Tier]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth and Profile Svc]
+    end
+    subgraph Services
+        Catalog[Catalog Service]
+        SearchSvc[Search Service]
+        Playback[Playback and License Svc]
+        Recs[Recommendation Svc]
+        Cont[Continue Watching Svc]
+        Bill[Billing Service]
+        AB[A B Test Service]
+        ThumbPers[Thumbnail Personalization]
+    end
+    subgraph Async [Encoding and ML]
+        EncQ[Encoding Queue]
+        Encoder[Per-Scene Encoder H264 H265 AV1]
+        ThumbGen[Thumbnail Variant Generator]
+        RecTrain[Rec Model Spark Training]
+        Prepos[Pre-positioning Job]
+    end
+    subgraph Storage
+        Master[(Mezzanine Masters S3)]
+        Variants[(Encoded Variants S3)]
+        CatDB[(Catalog DB)]
+        ES[(Elasticsearch)]
+        ViewState[(View State Cassandra)]
+        UserDB[(User and Profile DB)]
+        BillDB[(Subscriptions DB)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+        Feature[Feature Store]
+    end
+
+    Mobile -->|browse| APIGW --> Auth
+    APIGW --> Catalog --> CatDB
+    APIGW --> Recs --> Feature
+    APIGW --> ThumbPers --> Feature
+    APIGW --> Cont --> ViewState
+    TV -->|search| APIGW --> SearchSvc --> ES
+
+    Mobile -->|play title| APIGW --> Playback
+    Playback --> Auth
+    Playback --> Cont
+    Playback -->|signed manifest URL| Mobile
+    Mobile -->|DNS| GeoDNS --> OC
+    Mobile -->|manifest and segments| OC
+    OC -->|cache miss| Origin --> Variants
+    Mobile -->|playback heartbeat| EventBus
+    Playback --> AB
+
+    Web -->|billing| APIGW --> Bill --> BillDB
+
+    Master -->|new title| EncQ --> Encoder --> Variants
+    Encoder --> ThumbGen --> Variants
+    Variants --> Prepos --> OC
+
+    EventBus --> Lake --> RecTrain --> Feature
+    Auth --> UserDB
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class Master,Variants,CatDB,ES,ViewState,UserDB,BillDB storage
+    class EncQ,Encoder,ThumbGen,RecTrain,Prepos async
+    class GeoDNS,OC,Origin edge
+    class EventBus,Lake,Feature analytics`,
     tradeoffs: [
       { decision: 'Own CDN vs third-party', rationale: 'Operating Open Connect is expensive upfront but saves billions in transit costs at Netflix scale. Third-party CDNs (Akamai, Cloudflare) are better for smaller platforms.' },
     ],
@@ -527,16 +753,85 @@ export const systemDesignProblems = [
       { section: 'Real-time Updates', content: 'Driver app and rider app maintain WebSocket connections to a gateway. During a trip, the gateway forwards driver location to the rider\'s socket. Gateway cluster uses Redis pub/sub to route messages across gateway nodes.' },
       { section: 'Observability', content: 'Key metrics: match latency P99 (alert if >3s), location update staleness (alert if >10s gap for active driver), active WebSocket connections per gateway node, Redis GeoSet operation latency. Business metrics: match rate, cancel rate, surge multiplier per city. Dashboards split by city/region since demand is geographically localized.' },
     ],
-    diagram: `graph LR
-    Driver -->|GPS update/4s| LocSvc[Location Service]
-    LocSvc --> Redis[(Redis GeoSet)]
-    Rider -->|request ride| MatchSvc[Matching Service]
-    MatchSvc -->|GEORADIUS| Redis
-    MatchSvc -->|offer trip| Driver
-    Driver -->|accept| TripSvc[Trip Service]
-    TripSvc --> Cassandra[(Cassandra)]
-    TripSvc -->|location push| Gateway[WS Gateway]
-    Gateway -->|push| Rider`,
+    diagram: `graph TB
+    subgraph Clients
+        DriverApp[Driver App]
+        RiderApp[Rider App]
+    end
+    subgraph Edge [Realtime Edge]
+        WSGW[WebSocket Gateway]
+        APIGW[API Gateway]
+        PubSub[Redis Pub Sub]
+    end
+    subgraph Services
+        LocSvc[Location Service]
+        Match[Matching Service]
+        Trip[Trip Service]
+        Surge[Surge Pricing Svc]
+        Pay[Payment Service]
+        Rate[Rating Service]
+        Routing[ETA and Routing Svc]
+        UserSvc[User and Auth Svc]
+        NotifSvc[Notification Service]
+    end
+    subgraph Async
+        EventBus[Kafka Trip Events]
+        SurgeJob[Surge Aggregator H3 Hex]
+        PayBatch[Payment Settlement]
+        MLTrain[ETA Model Trainer]
+    end
+    subgraph Storage
+        GeoRedis[(Redis GeoSet)]
+        TripRedis[(Active Trip Cache)]
+        TripDB[(Completed Trips Cassandra)]
+        PayDB[(Payments DB)]
+        UserDB[(User DB)]
+        RatingDB[(Ratings DB)]
+        SurgeStore[(Surge Multiplier Cache)]
+    end
+    subgraph Analytics
+        Lake[(Data Lake)]
+        Feature[Feature Store]
+    end
+
+    DriverApp -->|GPS every 4s| WSGW --> LocSvc --> GeoRedis
+    LocSvc --> EventBus
+
+    RiderApp -->|request ride| APIGW --> Match
+    Match -->|GEORADIUS| GeoRedis
+    Match --> Surge --> SurgeStore
+    Match -->|offer trip| WSGW --> DriverApp
+
+    DriverApp -->|accept| WSGW --> Trip --> TripRedis
+    Trip --> EventBus
+    Trip -->|driver loc| PubSub --> WSGW
+    WSGW -->|live location| RiderApp
+    Trip --> Routing
+    Routing --> Feature
+
+    Trip -->|complete| TripDB
+    Trip --> Pay --> PayDB
+    Pay --> PayBatch
+
+    RiderApp -->|rate driver| APIGW --> Rate --> RatingDB
+    Rate --> UserSvc
+    APIGW --> UserSvc --> UserDB
+    Trip --> NotifSvc
+    NotifSvc --> RiderApp
+    NotifSvc --> DriverApp
+
+    EventBus --> Lake
+    EventBus --> SurgeJob --> SurgeStore
+    Lake --> MLTrain --> Feature
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class GeoRedis,TripRedis,TripDB,PayDB,UserDB,RatingDB,SurgeStore storage
+    class EventBus,SurgeJob,PayBatch,MLTrain async
+    class WSGW,APIGW,PubSub edge
+    class Lake,Feature analytics`,
     tradeoffs: [
       { decision: 'Redis GEORADIUS vs PostGIS', rationale: 'Redis is in-memory with sub-millisecond geospatial queries. PostGIS has richer query capabilities but is slower for high-frequency location updates. Redis wins for real-time matching.' },
     ],
