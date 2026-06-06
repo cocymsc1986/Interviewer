@@ -1008,4 +1008,187 @@ export const systemDesignProblems = [
     ],
     keyTakeaways: ['Redis sorted sets (ZSET) provide O(log N) rank queries on 100M players — the perfect data structure for leaderboards', 'ZINCRBY enables atomic score increments without race conditions', 'For cross-shard global top-N, merge top-K from each shard and take the global top-N'],
   },
+  {
+    id: 31,
+    slug: 'design-llm-inference-service',
+    title: 'Design an LLM Inference Service',
+    difficulty: 'Hard',
+    category: 'AI & Machine Learning',
+    tags: ['llm', 'gpu', 'batching', 'kv-cache', 'streaming', 'inference'],
+    problemStatement: `Design a production LLM inference service (like the OpenAI or Anthropic API) that serves large language models to external developers. The system must handle concurrent token-streaming requests, maximise GPU utilisation, and enforce per-customer rate limits. Target: 10M API requests/day, P50 time-to-first-token < 500ms, P99 < 2s.`,
+    requirements: {
+      functional: ['Accept a prompt and return a streamed token response', 'Support multiple models (e.g. 7B, 70B, 405B parameter variants)', 'Per-customer API key authentication and rate limiting', 'Usage metering (tokens in / tokens out) for billing', 'Cancel in-flight requests'],
+      nonFunctional: ['P50 time-to-first-token < 500ms', 'GPU utilisation > 70%', '99.9% availability', 'Support 10M requests/day (~115 rps average, 1000 rps peak'],
+    },
+    capacityEstimates: `Requests: 10M/day ≈ 115 rps avg, 1000 rps peak\nAvg prompt: 500 tokens in, 500 tokens out\nTotal tokens/day: 10M × 1000 = 10B tokens\nA100 GPU: ~3000 tokens/sec for a 7B model (batch=32)\nGPUs needed (7B): 10B / (3000 × 86400) ≈ 40 A100s for 7B; 10× more for 70B`,
+    solutionBreakdown: [
+      { section: 'Continuous Batching', content: 'Naïve static batching waits for a full batch before running — wastes GPU cycles when sequences finish at different times. Continuous batching (vLLM-style) inserts new requests into the batch the moment a slot frees. GPU utilisation jumps from ~30% to >70%. Each iteration of the forward pass processes a mixed batch of prefill (first token) and decode (subsequent tokens) steps.' },
+      { section: 'KV Cache Management', content: 'The key-value attention cache grows with sequence length and is the primary GPU memory bottleneck. PagedAttention (vLLM) manages KV cache in fixed-size blocks analogous to OS virtual memory pages, eliminating fragmentation. This allows 2–4× more concurrent requests per GPU. When GPU memory is exhausted, swap least-recently-used KV blocks to CPU RAM.' },
+      { section: 'Model Parallelism', content: 'A 70B parameter model does not fit on a single A100 (80GB). Tensor parallelism splits each weight matrix across N GPUs — each GPU holds 1/N of every layer and uses all-reduce after each layer. Pipeline parallelism assigns consecutive layers to different GPUs — lower communication overhead but introduces pipeline bubbles. Typical: tensor parallel across 4–8 GPUs within a node, pipeline parallel across nodes.' },
+      { section: 'Request Routing & Queuing', content: 'API Gateway authenticates API keys, checks rate limits (token bucket in Redis), and routes to the correct model cluster. A scheduler queue (Redis or Kafka) holds pending requests. The inference scheduler pulls from the queue and bins-packs requests by sequence length to minimise padding waste. Streaming responses are sent back via SSE (Server-Sent Events) or WebSocket.' },
+      { section: 'Observability & Cost', content: 'Token counters per API key feed the billing system (token-in × price_in + token-out × price_out). GPU utilisation, queue depth, and time-to-first-token are key SLIs. Auto-scaling triggers on queue depth: if queue grows > 100 requests, spin up another inference pod. Use spot/preemptible GPUs for non-latency-sensitive batch workloads.' },
+    ],
+    diagram: `graph TD
+    Client -->|POST /v1/chat| APIGW[API Gateway\nAuth + Rate Limit]
+    APIGW --> Queue[Request Queue\nRedis / Kafka]
+    Queue --> Scheduler[Inference Scheduler\nContinuous Batching]
+    Scheduler --> GPU1[GPU Cluster\nModel Shard 1]
+    Scheduler --> GPU2[GPU Cluster\nModel Shard 2]
+    GPU1 -->|tokens| Stream[SSE Stream]
+    GPU2 -->|tokens| Stream
+    Stream --> Client
+    APIGW --> Meter[Usage Metering\nBilling DB]`,
+    tradeoffs: [
+      { decision: 'Continuous batching vs static batching', rationale: 'Static batching is simpler but GPU sits idle waiting for the slowest sequence. Continuous batching is complex to implement but is required to hit >70% GPU utilisation in production.' },
+      { decision: 'Tensor parallelism vs pipeline parallelism', rationale: 'Tensor parallelism has lower latency (no pipeline bubbles) but higher per-layer communication cost. Pipeline parallelism reduces communication but adds latency. Tensor parallel is preferred within a single NVLink-connected node.' },
+    ],
+    keyTakeaways: ['Continuous batching + PagedAttention are the two key techniques that make production LLM serving economically viable', 'Time-to-first-token and tokens-per-second are the primary latency SLIs — they have very different bottlenecks (prefill vs decode)', 'Model sharding strategy depends on the model size relative to available GPU memory and the NVLink/InfiniBand topology'],
+  },
+  {
+    id: 32,
+    slug: 'design-rag-system',
+    title: 'Design a Retrieval-Augmented Generation (RAG) System',
+    difficulty: 'Hard',
+    category: 'AI & Machine Learning',
+    tags: ['rag', 'vector-search', 'embeddings', 'llm', 'chunking', 're-ranking'],
+    problemStatement: `Design a RAG system that lets users ask natural-language questions over a large private document corpus (e.g. a company's entire knowledge base — wikis, PDFs, Slack threads). The system retrieves the most relevant passages, injects them into an LLM prompt, and returns a grounded answer with source citations. Target: 10M documents, < 2s end-to-end latency, answers grounded in retrieved context.`,
+    requirements: {
+      functional: ['Ingest documents from multiple sources (PDF, HTML, Markdown)', 'Answer natural-language questions with cited sources', 'Support incremental updates (new/edited/deleted documents)', 'Return top-K source passages alongside the answer', 'Per-user access control (only surface documents the user can see)'],
+      nonFunctional: ['< 2s end-to-end latency', 'Retrieval recall@5 > 80%', '99.9% availability', '10M documents, ~500 tokens each'],
+    },
+    capacityEstimates: `Documents: 10M × 500 tokens × 4B/token ≈ 20 GB raw text\nEmbeddings: 10M × 1536 dims × 4B = 60 GB vectors\nIngestion: assume 100K new/updated docs/day ≈ 1.2 docs/sec\nQuery: 100 QPS × (embed + ANN + LLM) latency budget`,
+    solutionBreakdown: [
+      { section: 'Document Ingestion Pipeline', content: 'Ingestion is async: documents enter a queue (Kafka). Workers parse each format (PDF → Apache Tika, HTML → BeautifulSoup), then chunk into ~512-token passages with 50-token overlap between chunks (overlap preserves context across chunk boundaries). Each chunk is embedded using a sentence embedding model (e.g. text-embedding-3-large). Chunk metadata (doc_id, page, section, ACL tags) stored alongside the vector.' },
+      { section: 'Chunking Strategy', content: 'Fixed-size chunking is simple but splits sentences mid-thought. Prefer semantic chunking: split on paragraph/section boundaries, then sub-split only if a section exceeds the token limit. Hybrid chunk sizes: store both a small chunk (128 tokens, high precision) and the parent section (512 tokens, high recall). At retrieval time, fetch the small chunk for ranking but return the parent for context — the "parent document retriever" pattern.' },
+      { section: 'Vector Retrieval', content: 'Store vectors in a vector database (Pinecone, Weaviate, or pgvector). At query time: (1) embed the user question with the same model, (2) run ANN search to get top-50 candidates (HNSW index, cosine similarity), (3) apply metadata filters for access control — only return chunks whose ACL tags include the requesting user\'s groups. Metadata filtering before ANN avoids leaking restricted documents.' },
+      { section: 'Re-ranking', content: 'ANN retrieval optimises for embedding similarity, which is a proxy for relevance. A cross-encoder re-ranker (e.g. Cohere Rerank, a fine-tuned BERT) takes the query + each candidate chunk and scores them jointly — much more accurate than bi-encoder similarity but too slow to run on all documents. Run re-ranker on the top-50 ANN results, return top-5. Adds ~100ms but significantly improves answer quality.' },
+      { section: 'LLM Context Assembly & Prompting', content: 'Assemble a prompt: system instructions + top-5 retrieved passages (each labelled [Source 1], [Source 2]…) + user question. Ask the LLM to answer using only the provided sources and cite them. If no source is relevant, instruct the model to say so rather than hallucinate. Stream the response. Post-process to extract citation markers and map them to doc metadata for the UI.' },
+    ],
+    diagram: `graph TD
+    Docs[Documents\nPDF/HTML/MD] -->|async| Queue[Ingestion Queue\nKafka]
+    Queue --> Parser[Parse & Chunk]
+    Parser --> Embed[Embedding Service]
+    Embed --> VectorDB[(Vector DB\nHNSW Index)]
+    Parser --> DocStore[(Document Store\nS3 + Metadata DB)]
+    User -->|question| API[Query API]
+    API --> Embed2[Embed Question]
+    Embed2 -->|ANN search| VectorDB
+    VectorDB -->|top 50 chunks| Reranker[Cross-Encoder\nRe-ranker]
+    Reranker -->|top 5 chunks| LLM[LLM Service]
+    LLM -->|answer + citations| User`,
+    tradeoffs: [
+      { decision: 'Bi-encoder ANN vs cross-encoder for retrieval', rationale: 'Bi-encoder (ANN) is O(1) against a pre-built index — milliseconds for millions of vectors. Cross-encoder is O(N) — only feasible on the small candidate set. Two-stage pipeline gives the best of both.' },
+      { decision: 'Chunk size', rationale: 'Smaller chunks (128 tokens) improve precision (less irrelevant text per chunk) but may lose context. Larger chunks (1024 tokens) improve recall but dilute the relevance signal. The parent document retriever pattern decouples the two concerns.' },
+    ],
+    keyTakeaways: ['Two-stage retrieval (ANN + re-ranker) is the standard production pattern — pure vector search has insufficient precision for high-stakes answers', 'Access control must be enforced at the vector-search layer via metadata filters, not just at document fetch time', 'Chunking strategy has an outsized effect on answer quality — semantic chunking with parent retrieval outperforms naive fixed-size splitting'],
+  },
+  {
+    id: 33,
+    slug: 'design-ml-feature-store',
+    title: 'Design an ML Feature Store',
+    difficulty: 'Medium',
+    category: 'AI & Machine Learning',
+    tags: ['feature-store', 'ml', 'online-store', 'offline-store', 'point-in-time', 'data-pipeline'],
+    problemStatement: `Design a feature store that centralises the computation and serving of ML features. Data scientists define features once; the platform backfills historical values for training and serves fresh values at low latency for online inference. Target: 500 feature definitions, 10M entities (users/items), online feature reads < 10ms P99.`,
+    requirements: {
+      functional: ['Define features from batch (data warehouse) and streaming (Kafka) sources', 'Backfill historical feature values for model training', 'Serve online features at low latency for inference', 'Point-in-time correct joins for training data generation', 'Feature versioning and lineage tracking'],
+      nonFunctional: ['Online read latency < 10ms P99', 'Training data generation within hours of a job request', 'Feature freshness < 5 minutes for streaming features', '99.9% online store availability'],
+    },
+    capacityEstimates: `Entities: 10M users × 500 features × 8B avg = 40 GB in online store\nOnline reads: 50K rps (inference calls) → Redis handles comfortably\nOffline store: 10M entities × 500 features × 365 days = petabyte-scale in a columnar store\nStreaming: 100K events/sec → Flink computes and writes to online store`,
+    solutionBreakdown: [
+      { section: 'Feature Registry', content: 'Central metadata store where data scientists declare feature groups in code (Python SDK). Each feature definition specifies: source (table/query/Kafka topic), entity key (e.g. user_id), transformation logic, and freshness SLA. The registry is the single source of truth — enforces naming conventions, tracks ownership, and powers the data catalogue. Stored in a relational DB.' },
+      { section: 'Offline Store', content: 'Historical feature values stored in a columnar format (Parquet on S3, or BigQuery/Snowflake). Batch materialisation jobs (Spark) run on a schedule, reading from the data warehouse and writing feature values partitioned by entity and date. Training data generation performs a point-in-time correct join: for each training example with label timestamp T, fetch the feature values that were available at time T — preventing label leakage from future data.' },
+      { section: 'Online Store', content: 'Low-latency key-value store (Redis) holds the latest feature value per entity. Schema: key = entity_id, value = hash of {feature_name: value}. Batch materialisation jobs also write to Redis after writing to the offline store. Multiple features for one entity are fetched in a single HGETALL — one round-trip. Serialisation: Protocol Buffers or MessagePack for compactness.' },
+      { section: 'Streaming Materialisation', content: 'For features that must be fresh within minutes (e.g. "user click count in last 10 minutes"), a streaming pipeline (Flink or Spark Streaming) consumes the source Kafka topic, applies the transformation (windowed aggregation), and writes results to the online store in real time. Streaming features co-exist with batch features under the same entity key in Redis.' },
+      { section: 'Serving SDK & Consistency', content: 'Model inference code calls feature_store.get_online_features(entity_ids, feature_names). The SDK batches multiple entity lookups into a single Redis pipeline call. A common footgun: training used offline features; inference uses online features — if the two materialisation pipelines apply transformations differently, training-serving skew silently degrades model performance. The fix: share transformation logic in a single feature transformation library used by both pipelines.' },
+    ],
+    diagram: `graph TD
+    DW[Data Warehouse\nSnowflake/BigQuery] -->|batch job Spark| OfflineStore[(Offline Store\nS3 Parquet)]
+    Kafka[Kafka Events] -->|Flink streaming| OnlineStore[(Online Store\nRedis)]
+    DW -->|batch sync| OnlineStore
+    OfflineStore -->|point-in-time join| Training[Training Dataset]
+    Training --> ModelTraining[Model Training]
+    InferenceService[Inference Service] -->|get_online_features| OnlineStore
+    Registry[Feature Registry] -->|defines| OfflineStore
+    Registry -->|defines| OnlineStore`,
+    tradeoffs: [
+      { decision: 'Separate online vs offline stores vs unified', rationale: 'A single store (e.g. DynamoDB for both) simplifies consistency but cannot simultaneously serve petabyte-scale historical scans and sub-10ms point reads. Separate stores optimised for their access patterns are the industry standard (Feast, Tecton, Hopsworks all use this split).' },
+      { decision: 'Push vs pull materialisation to online store', rationale: 'Push (pipeline writes to Redis on each update) gives low latency but complexity. Pull (inference service reads from the warehouse on demand) is simpler but too slow for < 10ms SLA. Push materialisation is required for online serving.' },
+    ],
+    keyTakeaways: ['Point-in-time correctness in training data joins is the most common source of training-serving skew — the feature store must handle this automatically', 'Sharing transformation logic between batch and streaming pipelines eliminates the most dangerous class of skew bugs', 'Redis HGETALL fetches all features for an entity in one round-trip — critical for keeping online latency under 10ms'],
+  },
+  {
+    id: 34,
+    slug: 'design-ml-training-platform',
+    title: 'Design an ML Training Platform',
+    difficulty: 'Hard',
+    category: 'AI & Machine Learning',
+    tags: ['distributed-training', 'gpu-scheduling', 'experiment-tracking', 'model-registry', 'mlops'],
+    problemStatement: `Design an internal ML training platform (like AWS SageMaker Training or Kubeflow) that lets data scientists submit training jobs, tracks experiments, manages datasets and model artefacts, and provisions GPU clusters on demand. Target: 500 data scientists, 1000 training jobs/day, from small CPU jobs to 512-GPU distributed runs.`,
+    requirements: {
+      functional: ['Submit training jobs with arbitrary code, dependencies, and hardware requirements', 'Distributed training across multiple GPUs/nodes', 'Experiment tracking (hyperparameters, metrics, artefacts)', 'Dataset versioning and lineage', 'Model registry with versioning and stage promotion (staging → production)'],
+      nonFunctional: ['GPU utilisation across the cluster > 60%', 'Job scheduling latency < 60s for standard jobs', 'Artefact storage durable to 11 nines', 'Support heterogeneous hardware (A100s, H100s, CPUs)'],
+    },
+    capacityEstimates: `Jobs: 1000/day ≈ 0.7 jobs/sec submitted\nGPU fleet: 1000 A100s total\nArtefacts: avg 5 GB/job × 1000 jobs/day = 5 TB/day stored in S3\nMetrics: 1000 jobs × 1000 metric points = 1M data points/day — trivial for a time-series store`,
+    solutionBreakdown: [
+      { section: 'Job Submission & Scheduling', content: 'Data scientist submits a job via CLI/SDK specifying: Docker image, entry-point command, resource request (N GPUs, memory, CPU), priority, and dataset path. The scheduler (built on Kubernetes + a gang-scheduling plugin like Volcano) places the job when enough nodes are free. Gang scheduling is critical: a distributed training job needs ALL N nodes simultaneously — partial allocation causes deadlock. Priority queues ensure high-priority jobs preempt lower-priority ones.' },
+      { section: 'Distributed Training', content: 'The platform injects environment variables (MASTER_ADDR, WORLD_SIZE, RANK) so the training code can initialise PyTorch DDP (Distributed Data Parallel) or FSDP (Fully Sharded Data Parallel) without platform-specific code. DDP: each GPU holds a full model copy, gradients all-reduced after each backward pass — standard for models that fit in single-GPU memory. FSDP: shards model parameters, gradients, and optimiser state across GPUs — required for 10B+ parameter models. The platform also sets up NCCL (NVIDIA Collective Communications Library) for high-bandwidth GPU-to-GPU communication over InfiniBand.' },
+      { section: 'Experiment Tracking', content: 'A lightweight SDK call (mlflow.log_metric, mlflow.log_param) inside training code sends hyperparameters and metrics to the tracking server. The tracking server writes to a relational DB (PostgreSQL). Large artefacts (model checkpoints, plots) are written to S3 with the path recorded in the DB. The UI provides run comparison, metric charts over time, and artefact browsing. Runs are grouped under experiments and can be tagged for easy filtering.' },
+      { section: 'Model Registry', content: 'After a training run, the data scientist registers the best checkpoint to the model registry: a versioned catalogue of trained models. Each version records: training run ID (lineage back to code + data + hyperparameters), evaluation metrics, and a lifecycle stage (None → Staging → Production → Archived). The inference platform reads model URIs from the registry to deploy — decoupling training from serving and enabling safe rollbacks.' },
+      { section: 'Fault Tolerance & Checkpointing', content: 'Long training runs (days on 512 GPUs) are expensive to restart from scratch. The platform periodically saves checkpoints to S3 (every N steps). On node failure, the job is automatically restarted from the latest checkpoint. Spot/preemptible instance interruptions are handled via a "checkpoint on SIGTERM" signal handler injected by the platform. Elastic training (PyTorch Elastic) allows a job to continue with fewer nodes after a failure rather than full restart.' },
+    ],
+    diagram: `graph TD
+    DS[Data Scientist] -->|submit job| CLI[CLI / SDK]
+    CLI --> JobAPI[Job API]
+    JobAPI --> Scheduler[Gang Scheduler\nKubernetes + Volcano]
+    Scheduler --> GPUNodes[GPU Node Pool\nA100 / H100]
+    GPUNodes -->|metrics, params| Tracker[Experiment Tracker\nMLflow]
+    GPUNodes -->|checkpoints| S3[(S3 Artefact Store)]
+    GPUNodes -->|model| Registry[Model Registry]
+    Registry -->|deploy URI| InferencePlatform[Inference Platform]
+    Tracker --> DB[(PostgreSQL\nRun Metadata)]`,
+    tradeoffs: [
+      { decision: 'Gang scheduling vs best-effort scheduling', rationale: 'Best-effort partial allocation causes distributed jobs to hang waiting for remaining nodes — wasting the allocated GPUs. Gang scheduling guarantees all-or-nothing allocation, eliminating deadlock at the cost of some scheduler complexity and potential head-of-line blocking by large jobs.' },
+      { decision: 'DDP vs FSDP', rationale: 'DDP is simpler and has lower communication overhead (only gradients are communicated), but requires the full model to fit in each GPU\'s memory. FSDP shards everything, enabling training of models 4–8× larger, at the cost of higher communication volume and implementation complexity.' },
+    ],
+    keyTakeaways: ['Gang scheduling is non-negotiable for distributed training — partial allocation causes silent deadlocks that waste expensive GPU hours', 'FSDP/ZeRO-style sharding is the standard technique for training models that exceed single-GPU memory', 'The model registry creates the critical audit trail linking a deployed model back to its exact training code, dataset version, and hyperparameters'],
+  },
+  {
+    id: 35,
+    slug: 'design-vector-database',
+    title: 'Design a Vector Database',
+    difficulty: 'Hard',
+    category: 'AI & Machine Learning',
+    tags: ['vector-database', 'ann', 'hnsw', 'embeddings', 'similarity-search', 'ivf'],
+    problemStatement: `Design a vector database (like Pinecone, Weaviate, or Qdrant) that stores high-dimensional embedding vectors and answers approximate nearest-neighbour (ANN) queries in milliseconds. The system must support metadata filtering, real-time upserts, and horizontal scaling. Target: 1B vectors at 1536 dimensions, < 50ms P99 query latency, 99.9% availability.`,
+    requirements: {
+      functional: ['Upsert vectors with an ID and optional metadata payload', 'Query top-K nearest vectors to a query vector (cosine / dot-product / L2)', 'Filter by metadata predicates during search (e.g. category=finance AND date>2024)', 'Delete vectors by ID', 'Namespace/collection isolation for multi-tenancy'],
+      nonFunctional: ['Query latency < 50ms P99', 'Upsert visible within 1s (near real-time index update)', '99.9% availability', '1B vectors at 1536 dims'],
+    },
+    capacityEstimates: `Storage: 1B × 1536 dims × 4B (float32) = 6 TB raw vectors\nWith HNSW graph overhead (~5×): ~30 TB index on disk\nIn-memory (quantised to int8): 1B × 1536B = 1.5 TB RAM across nodes\nQuery: 10K QPS × 50ms budget → need ~500 query threads across cluster`,
+    solutionBreakdown: [
+      { section: 'HNSW Index', content: 'Hierarchical Navigable Small World (HNSW) is the dominant ANN algorithm for high recall + low latency. It builds a multi-layer graph: the top layer is sparse (long-range links for fast traversal), lower layers are dense (short-range links for precision). Query: start at the top layer, greedily navigate towards the query vector, descend to the next layer at the entry point, repeat until layer 0. Search is O(log N) in practice. Construction is O(N log N) — expensive but done once offline. ef_construction and M hyperparameters trade index build time / memory vs recall.' },
+      { section: 'Quantisation', content: 'Full float32 vectors (1B × 1536 × 4B = 6 TB) cannot fit in RAM for fast access. Product Quantisation (PQ) compresses each vector by splitting into sub-vectors and replacing each with a codebook index. 96× compression (float32 → 1-byte code per sub-vector) at ~5% recall cost. HNSW graph traversal uses quantised vectors for candidate selection; the final top-K re-scoring fetches the original float32 vectors for accuracy. Scalar quantisation (float32 → int8) gives 4× compression with minimal recall loss and is now the default in most production systems.' },
+      { section: 'Metadata Filtering', content: 'Two strategies for combining vector search with metadata filters. Pre-filtering: apply the metadata filter first (from an inverted index), then run ANN only on the filtered subset — accurate but slow if the filter is selective (ANN on 1K vectors loses graph efficiency). Post-filtering: run ANN on all vectors, then discard results that fail the filter — fast but can return fewer than K results if the filter is selective. Production systems use a hybrid: if filter selectivity > threshold, use a filtered HNSW traversal (only traverse nodes matching the filter); otherwise fall back to post-filter.' },
+      { section: 'Distributed Architecture', content: 'Shard vectors across nodes by ID range or consistent hashing. Each shard holds a full HNSW index for its vectors. At query time, the query is broadcast to all shards (scatter); each shard returns its local top-K; the coordinator merges and re-ranks the global top-K (gather). Replication factor of 3 for read availability and fault tolerance. Writes go to a primary shard; the primary updates its HNSW index and replicates asynchronously to replicas.' },
+      { section: 'Real-time Upserts', content: 'HNSW does not support efficient incremental deletes — deleting from the graph requires re-linking neighbours. Solution: mark deleted vectors with a tombstone (skip during traversal). Periodically compact the index offline to physically remove tombstones. New vectors are inserted into the graph immediately (HNSW supports online inserts in O(log N)). To handle the delay between upsert and index refresh on replicas, the client SDK can fall back to a brute-force scan of a small "dirty buffer" of recent upserts not yet in the main index.' },
+    ],
+    diagram: `graph TD
+    Client -->|upsert / query| LB[Load Balancer]
+    LB --> Coordinator[Query Coordinator]
+    Coordinator -->|scatter query| Shard1[Shard 1\nHNSW Index]
+    Coordinator -->|scatter query| Shard2[Shard 2\nHNSW Index]
+    Coordinator -->|scatter query| Shard3[Shard 3\nHNSW Index]
+    Shard1 -->|local top-K| Coordinator
+    Shard2 -->|local top-K| Coordinator
+    Shard3 -->|local top-K| Coordinator
+    Coordinator -->|global top-K| Client
+    Shard1 --- Replica1[(Replica 1)]
+    Shard2 --- Replica2[(Replica 2)]`,
+    tradeoffs: [
+      { decision: 'HNSW vs IVF (Inverted File Index)', rationale: 'HNSW gives higher recall at low latency with no training step, but uses more memory (graph edges). IVF clusters vectors into centroids (requires k-means training), then searches only nearby clusters — lower memory, easier to shard, but slightly lower recall and requires retraining when the distribution shifts. HNSW dominates for online serving; IVF+PQ is preferred for billion-scale offline batch search.' },
+      { decision: 'Pre-filtering vs post-filtering for metadata', rationale: 'Post-filtering is simple but fails on selective filters (returns too few results). Pre-filtering with a filtered HNSW traversal is accurate but requires the metadata index to be co-located with the vector index, increasing implementation complexity. Most production systems use a selectivity-based routing heuristic.' },
+    ],
+    keyTakeaways: ['HNSW provides O(log N) query time with high recall but requires the graph to fit in memory — quantisation is essential at billion-vector scale', 'Scatter-gather across shards is the standard distributed query pattern; the coordinator merges per-shard top-K lists into the global result', 'Metadata filtering and ANN search are fundamentally at odds — the routing strategy between pre/post/filtered-traversal is the core design decision for a production vector DB'],
+  },
 ];
