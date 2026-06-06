@@ -10,7 +10,12 @@ export default function MermaidDiagram({ chart }) {
 
     async function render() {
       const mermaid = (await import('mermaid')).default;
-      mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'dark',
+        securityLevel: 'loose',
+        flowchart: { useMaxWidth: false },
+      });
 
       const id = `mermaid-${Math.random().toString(36).slice(2)}`;
       try {
