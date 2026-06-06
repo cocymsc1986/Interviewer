@@ -655,15 +655,70 @@ export const systemDesignProblems = [
       { section: 'Content Invalidation', content: 'Origin sends purge API calls to CDN control plane. Control plane propagates invalidation to all edge nodes (gossip protocol or pub-sub). Stale objects evicted on next request.' },
       { section: 'TLS Termination', content: 'TLS terminated at edge. Each PoP has the TLS certificate. Reduces TLS handshake RTT from ~150ms (origin) to <20ms (local edge). OCSP stapling avoids revocation lookups.' },
     ],
-    diagram: `graph LR
-    User -->|DNS query| DNS[Geo-DNS]
-    DNS -->|nearest PoP IP| User
-    User -->|HTTPS request| Edge[Edge PoP]
-    Edge -->|L1 miss| Mid[Mid-tier Cache]
-    Mid -->|L2 miss| Origin[Origin Server]
-    Origin --> Mid
-    Mid --> Edge
-    Edge -->|cached asset| User`,
+    diagram: `graph TB
+    subgraph Clients
+        Browser[Browser]
+        MobileApp[Mobile App]
+        VideoPlayer[Video Player]
+    end
+    subgraph Edge
+        GeoDNS[Geo-DNS Anycast]
+        EdgePoP[Edge PoP L1 Cache]
+        TLS[TLS Termination at Edge]
+        WAF[WAF and DDoS Shield]
+    end
+    subgraph Services
+        MidTier[Mid-tier Regional Cache L2]
+        PurgeAPI[Purge and Invalidate API]
+        Control[Control Plane]
+        OCSP[OCSP Stapling Service]
+    end
+    subgraph Async
+        Gossip[Invalidation Gossip]
+        LogAgg[Edge Log Aggregator]
+        PrefetchJob[Prefetch and Prewarm Job]
+    end
+    subgraph Storage
+        EdgeSSD[(Edge SSD Cache)]
+        MidHDD[(Mid-tier HDD Cache)]
+        Origin[(Origin Server)]
+        CertStore[(TLS Cert Store)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Access Logs]
+        Lake[(Data Lake)]
+    end
+
+    Browser -->|DNS query| GeoDNS
+    MobileApp -->|DNS query| GeoDNS
+    GeoDNS -->|nearest PoP IP| Browser
+
+    Browser -->|HTTPS request| TLS --> WAF --> EdgePoP
+    EdgePoP --> EdgeSSD
+    EdgePoP -->|L1 miss| MidTier --> MidHDD
+    MidTier -->|L2 miss| Origin
+    Origin --> MidTier --> EdgePoP --> Browser
+
+    VideoPlayer -->|segment fetch| EdgePoP
+    TLS --> CertStore
+    TLS --> OCSP
+
+    Origin -->|purge call| PurgeAPI --> Control --> Gossip
+    Gossip --> EdgePoP
+    Gossip --> MidTier
+
+    Control --> PrefetchJob --> EdgePoP
+
+    EdgePoP --> EventBus --> LogAgg --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class EdgeSSD,MidHDD,Origin,CertStore storage
+    class Gossip,LogAgg,PrefetchJob async
+    class GeoDNS,EdgePoP,TLS,WAF edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Anycast vs DNS-based routing', rationale: 'Anycast is faster (no extra DNS round trip) and handles failover via BGP. DNS-based routing is simpler to deploy and allows finer geographic control.' },
     ],
@@ -795,14 +850,79 @@ export const systemDesignProblems = [
       { section: 'Conflict Resolution', content: 'Use vector clocks to detect concurrent writes. A vector clock is a per-node counter map (e.g., {A:2, B:1}) stored with each value. When node A writes, it increments its own counter. If two versions have incomparable clocks (neither dominates the other), they were written concurrently — a true conflict. On conflict, use last-write-wins (timestamp) or return both versions to the client for application-level resolution (DynamoDB shopping-cart pattern).' },
       { section: 'Failure Handling', content: 'Hinted handoff: if a node is temporarily down, another node stores writes with a hint to forward later. Anti-entropy (Merkle tree comparison) detects and repairs diverged replicas in the background.' },
     ],
-    diagram: `graph TD
-    Client -->|GET/PUT| CoordNode[Coordinator Node]
-    CoordNode -->|hash key| Ring[Consistent Hash Ring]
-    Ring --> N1[Node 1]
-    Ring --> N2[Node 2 replica]
-    Ring --> N3[Node 3 replica]
-    N1 --> LSM[LSM Tree\nMemTable + SSTables]
-    N1 -->|WAL| Disk[(Disk)]`,
+    diagram: `graph TB
+    subgraph Clients
+        App[Application Client]
+        SDK[KV SDK]
+    end
+    subgraph Gateway
+        LB[Load Balancer]
+        Coord[Coordinator Node]
+    end
+    subgraph Services
+        Ring[Consistent Hash Ring]
+        N1[Node 1 Primary]
+        N2[Node 2 Replica]
+        N3[Node 3 Replica]
+        ReadPath[Quorum Read R equals 2]
+        WritePath[Quorum Write W equals 2]
+        VC[Vector Clock Resolver]
+        Gossip[Gossip Membership]
+    end
+    subgraph Async
+        Hinted[Hinted Handoff Queue]
+        AntiEntropy[Merkle Anti-Entropy Job]
+        Compaction[SSTable Compaction]
+        TTLSweeper[TTL Sweeper]
+    end
+    subgraph Storage
+        MemTable[(MemTable In-Memory)]
+        WAL[(Write-Ahead Log)]
+        SSTable[(SSTables on Disk)]
+        Bloom[(Bloom Filter Index)]
+        HintStore[(Hint Store)]
+        MetaDB[(Cluster Metadata)]
+    end
+
+    App --> SDK --> LB --> Coord
+    Coord --> Ring
+    Ring --> N1
+    Ring --> N2
+    Ring --> N3
+
+    SDK -->|PUT key| Coord --> WritePath
+    WritePath --> N1 --> WAL
+    N1 --> MemTable
+    MemTable --> SSTable
+    SSTable --> Bloom
+    WritePath --> N2
+    WritePath --> N3
+
+    SDK -->|GET key| Coord --> ReadPath
+    ReadPath --> N1
+    ReadPath --> N2
+    ReadPath --> N3
+    ReadPath --> VC
+
+    SDK -->|DELETE key| Coord --> WritePath
+    SDK -->|GET with TTL| Coord
+    TTLSweeper --> SSTable
+
+    N1 -.->|node down| Hinted --> HintStore
+    HintStore --> N1
+    AntiEntropy --> N1
+    AntiEntropy --> N2
+    AntiEntropy --> N3
+    Compaction --> SSTable
+    Gossip --> MetaDB
+    Gossip --> Ring
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    class MemTable,WAL,SSTable,Bloom,HintStore,MetaDB storage
+    class Hinted,AntiEntropy,Compaction,TTLSweeper async
+    class LB edge`,
     tradeoffs: [
       { decision: 'LSM tree vs B-tree storage', rationale: 'LSM optimizes for write throughput (sequential disk I/O). B-trees are better for read-heavy workloads. Key-value stores typically favor writes, making LSM the standard choice.' },
       { decision: 'Strong vs eventual consistency', rationale: 'Strong consistency (R+W > N) increases latency and reduces availability. Eventual consistency is preferred when availability matters more than strict correctness.' },
@@ -829,13 +949,85 @@ export const systemDesignProblems = [
       { section: 'Conflict Resolution', content: 'If two clients modify the same file offline, detect conflict via version vectors. Create a conflict copy ("File (conflict copy, 2024-01-01)"). No automatic merge — user resolves.' },
       { section: 'Versioning', content: 'Each upload creates a new version row. Store all chunk references per version. Revert = swap the active version pointer. Storage cost = only unique chunks across all versions (dedup).' },
     ],
-    diagram: `graph LR
-    Client -->|chunk upload| API[API Service]
-    Client -->|metadata| MetaSvc[Metadata Service]
-    MetaSvc --> DB[(PostgreSQL)]
-    API -->|chunks| S3[(Blob Storage S3)]
-    MetaSvc -->|notify| PubSub[Notification Service]
-    PubSub -->|push| Client2[Other Devices]`,
+    diagram: `graph TB
+    subgraph Clients
+        Desktop[Desktop Sync Client]
+        Mobile[Mobile App]
+        WebUI[Web UI]
+    end
+    subgraph Edge
+        CDN[CDN for Downloads]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        UploadSvc[Chunk Upload Service]
+        DownloadSvc[Download Service]
+        MetaSvc[Metadata Service]
+        SyncSvc[Sync and Notify Service]
+        ShareSvc[Sharing and ACL Service]
+        VersionSvc[Version History Service]
+        ConflictSvc[Conflict Resolver]
+        SearchSvc[Search Service]
+    end
+    subgraph Async
+        DedupQ[Dedup Hash Lookup]
+        ThumbGen[Thumbnail and Preview Gen]
+        Indexer[Search Indexer]
+        VirusScan[Antivirus Scanner]
+        TrashGC[Trash Garbage Collector]
+    end
+    subgraph Storage
+        ChunkStore[(Chunk Blob Store S3)]
+        MetaDB[(Metadata DB PostgreSQL)]
+        ChunkIndex[(Chunk Hash Index)]
+        VersionDB[(Version History DB)]
+        ACLDB[(Sharing ACL DB)]
+        ES[(Elasticsearch)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+    end
+
+    Desktop -->|hash chunks then upload| APIGW
+    Mobile -->|upload| APIGW
+    APIGW --> Auth
+    APIGW --> UploadSvc
+    UploadSvc --> DedupQ --> ChunkIndex
+    UploadSvc --> ChunkStore
+    UploadSvc --> MetaSvc --> MetaDB
+    MetaSvc --> VersionSvc --> VersionDB
+    UploadSvc --> VirusScan
+    UploadSvc --> ThumbGen --> ChunkStore
+
+    WebUI -->|download| CDN --> DownloadSvc --> ChunkStore
+    WebUI -->|view metadata| APIGW --> MetaSvc
+
+    MetaSvc -->|change event| SyncSvc
+    SyncSvc -->|websocket push| Desktop
+    SyncSvc -->|websocket push| Mobile
+
+    Desktop -->|conflicting edit| ConflictSvc --> VersionDB
+
+    WebUI -->|share folder| APIGW --> ShareSvc --> ACLDB
+    WebUI -->|search files| APIGW --> SearchSvc --> ES
+    MetaSvc --> EventBus --> Indexer --> ES
+    EventBus --> Lake
+
+    MetaDB --> TrashGC --> ChunkStore
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class ChunkStore,MetaDB,ChunkIndex,VersionDB,ACLDB,ES storage
+    class DedupQ,ThumbGen,Indexer,VirusScan,TrashGC async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Block-level dedup vs file-level dedup', rationale: 'Block-level dedup (chunk hashing) saves far more space for files with minor edits. File-level dedup only catches identical files. Block-level is standard.' },
     ],
@@ -861,13 +1053,75 @@ export const systemDesignProblems = [
       { section: 'Cache Aside Pattern', content: 'Application code reads from cache. On miss, reads from DB and populates cache with a TTL. On write, application writes to DB and either invalidates the cache key or updates it (write-through).' },
       { section: 'Thundering Herd Prevention', content: 'When a hot key expires, many requests simultaneously miss and hit the DB. Mitigations: (1) Add random jitter to TTLs. (2) Use mutex/lock for the first request to repopulate; others wait. (3) Background refresh before expiry.' },
     ],
-    diagram: `graph LR
-    App[Application] -->|read| Cache[Cache Cluster]
-    Cache -->|hit| App
-    Cache -->|miss| DB[(Database)]
-    DB -->|populate| Cache
-    App -->|write| DB
-    App -->|invalidate| Cache`,
+    diagram: `graph TB
+    subgraph Clients
+        AppA[App Server A]
+        AppB[App Server B]
+        Worker[Background Worker]
+    end
+    subgraph Gateway
+        Proxy[Smart Client SDK]
+        HashRing[Consistent Hash Router]
+    end
+    subgraph Services
+        Shard1Primary[Shard 1 Primary]
+        Shard1Replica[Shard 1 Replica]
+        Shard2Primary[Shard 2 Primary]
+        Shard2Replica[Shard 2 Replica]
+        ShardN[Shard N Primary]
+        Sentinel[Sentinel Failover Monitor]
+        Mutex[Stampede Mutex Lock]
+    end
+    subgraph Async
+        EvictLRU[LRU Eviction Task]
+        Repl[Async Replication Stream]
+        TTLExpire[TTL Expiration Sweep]
+        WarmJob[Cache Warmer]
+        RefreshAhead[Background Refresh]
+    end
+    subgraph Storage
+        Mem1[(Shard 1 RAM)]
+        Mem2[(Shard 2 RAM)]
+        MemN[(Shard N RAM)]
+        DB[(Origin Database)]
+        AOF[(Append-only File)]
+        Snapshot[(RDB Snapshot)]
+    end
+
+    AppA --> Proxy
+    AppB --> Proxy
+    Worker --> Proxy
+    Proxy --> HashRing
+
+    HashRing -->|GET key| Shard1Primary --> Mem1
+    HashRing -->|SET key| Shard2Primary --> Mem2
+    HashRing -->|INCR counter| ShardN --> MemN
+    HashRing -->|SETNX lock| Shard1Primary
+
+    Shard1Primary --> Repl --> Shard1Replica
+    Shard2Primary --> Repl --> Shard2Replica
+    Shard1Primary --> AOF
+    Shard1Primary --> Snapshot
+
+    AppA -->|read miss| Mutex
+    Mutex -->|fetch origin| DB
+    DB -->|populate| Shard1Primary
+    AppA -->|write through| DB
+    AppA -->|invalidate key| Shard1Primary
+
+    Sentinel --> Shard1Primary
+    Sentinel --> Shard2Primary
+    Sentinel -->|promote| Shard1Replica
+    EvictLRU --> Mem1
+    EvictLRU --> Mem2
+    TTLExpire --> Mem1
+    WarmJob --> Shard1Primary
+    RefreshAhead --> Shard2Primary
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    class Mem1,Mem2,MemN,DB,AOF,Snapshot storage
+    class EvictLRU,Repl,TTLExpire,WarmJob,RefreshAhead async`,
     tradeoffs: [
       { decision: 'Cache aside vs write-through', rationale: 'Cache aside is simple and avoids caching data that is never read. Write-through always keeps cache warm but wastes memory on write-heavy data that is rarely read.' },
     ],
@@ -893,14 +1147,92 @@ export const systemDesignProblems = [
       { section: 'Time Synchronization (TrueTime)', content: 'Spanner uses GPS+atomic clock (TrueTime) to assign globally ordered timestamps. CockroachDB uses HLC (Hybrid Logical Clocks) to approximate this without specialized hardware. Ensures cross-shard transaction ordering.' },
       { section: 'SQL Layer', content: 'SQL queries parsed and optimized into a distributed execution plan. The optimizer pushes predicates to the storage layer to minimize data transfer. Joins across shards use a distributed hash join or broadcast join.' },
     ],
-    diagram: `graph TD
-    Client --> SQLLayer[SQL Layer\nQuery Optimizer]
-    SQLLayer --> TxCoord[Transaction Coordinator]
-    TxCoord -->|2PC| Range1[Range Leader 1\nRaft Group]
-    TxCoord -->|2PC| Range2[Range Leader 2\nRaft Group]
-    Range1 --> R1F1[Follower]
-    Range1 --> R1F2[Follower]
-    Range2 --> R2F1[Follower]`,
+    diagram: `graph TB
+    subgraph Clients
+        AppClient[App Client]
+        SQLDriver[SQL Driver]
+        AnalyticsClient[Analytics Client]
+    end
+    subgraph Gateway
+        LB[Load Balancer]
+        SQLLayer[SQL Parser and Optimizer]
+        Planner[Distributed Plan Executor]
+    end
+    subgraph Services
+        TxCoord[Transaction Coordinator]
+        TwoPC[Two Phase Commit Manager]
+        HLC[Hybrid Logical Clock]
+        MetaLayer[Range Metadata Service]
+        Range1Leader[Range 1 Raft Leader]
+        Range2Leader[Range 2 Raft Leader]
+        Range3Leader[Range 3 Raft Leader]
+        Range1F1[Range 1 Follower]
+        Range1F2[Range 1 Follower]
+        Range2F1[Range 2 Follower]
+        Range3F1[Range 3 Follower]
+        SchemaSvc[Online Schema Change]
+    end
+    subgraph Async
+        Rebalancer[Range Rebalancer]
+        Splitter[Range Splitter 64MB]
+        Backup[Incremental Backup Job]
+        GC[MVCC Garbage Collector]
+        ReplLag[Replica Catch-up Worker]
+    end
+    subgraph Storage
+        RaftLog[(Raft Log)]
+        RocksDB[(RocksDB Range Store)]
+        MetaDB[(Range Metadata Table)]
+        BackupBlob[(Backup Object Store)]
+        CDCStream[(CDC Change Stream)]
+    end
+    subgraph Analytics
+        EventBus[Kafka CDC Bus]
+        Warehouse[(Analytics Warehouse)]
+    end
+
+    AppClient --> SQLDriver --> LB --> SQLLayer
+    AnalyticsClient --> LB
+    SQLLayer --> Planner
+    Planner --> MetaLayer --> MetaDB
+
+    Planner -->|single range read| Range1Leader
+    Planner -->|distributed join| Range2Leader
+    Planner -->|distributed join| Range3Leader
+
+    SQLDriver -->|BEGIN TXN| TxCoord
+    TxCoord --> HLC
+    TxCoord --> TwoPC
+    TwoPC -->|prepare| Range1Leader
+    TwoPC -->|prepare| Range2Leader
+    TwoPC -->|commit| Range1Leader
+    TwoPC -->|commit| Range2Leader
+
+    Range1Leader --> RaftLog
+    Range1Leader --> RocksDB
+    Range1Leader --> Range1F1
+    Range1Leader --> Range1F2
+    Range2Leader --> Range2F1
+    Range3Leader --> Range3F1
+
+    SQLDriver -->|ALTER TABLE| SchemaSvc --> MetaLayer
+
+    Splitter --> Range1Leader
+    Rebalancer --> Range2Leader
+    GC --> RocksDB
+    ReplLag --> Range1F1
+    Backup --> BackupBlob
+
+    Range1Leader --> CDCStream --> EventBus --> Warehouse
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class RaftLog,RocksDB,MetaDB,BackupBlob,CDCStream storage
+    class Rebalancer,Splitter,Backup,GC,ReplLag async
+    class LB edge
+    class EventBus,Warehouse analytics`,
     tradeoffs: [
       { decision: 'Raft vs Paxos', rationale: 'Raft is easier to understand and implement correctly. Paxos has better-studied theoretical properties but harder to implement. Most modern systems choose Raft.' },
     ],
@@ -926,16 +1258,93 @@ export const systemDesignProblems = [
       { section: 'User Preferences', content: 'Users store preferences in a NoSQL store: { userId, channel: { push: true, email: false }, types: { marketing: false, transactional: true } }. Checked before every send.' },
       { section: 'Rate Limiting per User', content: 'Apply per-user per-channel rate limits (e.g., max 5 marketing emails/week) using a Redis counter. Suppress excess notifications with a priority queue — high-priority (transactional) notifications always go through.' },
     ],
-    diagram: `graph LR
-    Events[Event Sources] -->|publish| Kafka[Kafka]
-    Kafka -->|consume| NotifSvc[Notification Service]
-    NotifSvc -->|check prefs| PrefDB[(Preferences DB)]
-    NotifSvc -->|push queue| PushWorker[Push Worker]
-    NotifSvc -->|email queue| EmailWorker[Email Worker]
-    NotifSvc -->|sms queue| SMSWorker[SMS Worker]
-    PushWorker --> FCM[FCM / APNs]
-    EmailWorker --> SES[AWS SES]
-    SMSWorker --> Twilio[Twilio]`,
+    diagram: `graph TB
+    subgraph Clients
+        Mobile[Mobile App]
+        Web[Web App]
+        EmailInbox[Email Inbox]
+        Phone[SMS Phone]
+    end
+    subgraph Edge
+        APNs[APNs and FCM Gateway]
+    end
+    subgraph Gateway
+        APIGW[Notification API]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        EventConsumer[Event Consumer]
+        NotifRouter[Notification Router]
+        PrefSvc[Preference Service]
+        TemplateSvc[Template Renderer]
+        RateLimiter[Per User Rate Limiter]
+        Dedup[Idempotency Dedup]
+        ReceiptSvc[Delivery Receipt Service]
+        PrioritySvc[Priority Queue Service]
+    end
+    subgraph Async
+        Kafka[Kafka Event Topics]
+        PushQ[Push Queue]
+        EmailQ[Email Queue]
+        SMSQ[SMS Queue]
+        PushWorker[Push Worker Pool]
+        EmailWorker[Email Worker Pool]
+        SMSWorker[SMS Worker Pool]
+        RetryQ[Retry Queue Exp Backoff]
+        DLQ[Dead Letter Queue]
+    end
+    subgraph Services2 [Providers]
+        FCM[FCM and APNs]
+        SES[AWS SES SendGrid]
+        Twilio[Twilio SMS]
+    end
+    subgraph Storage
+        PrefDB[(Preferences DB)]
+        TemplateDB[(Templates DB)]
+        IdempDB[(Idempotency Keys)]
+        RLRedis[(Rate Limit Redis)]
+        ReceiptDB[(Delivery Receipts)]
+    end
+    subgraph Analytics
+        EventBus[Analytics Bus]
+        Lake[(Data Lake)]
+    end
+
+    Mobile -->|register token| APIGW --> Auth
+    APIGW --> PrefSvc --> PrefDB
+
+    EventConsumer --> Kafka
+    Kafka --> NotifRouter
+    NotifRouter --> PrefSvc
+    NotifRouter --> Dedup --> IdempDB
+    NotifRouter --> RateLimiter --> RLRedis
+    NotifRouter --> TemplateSvc --> TemplateDB
+    NotifRouter --> PrioritySvc
+
+    PrioritySvc -->|push| PushQ --> PushWorker --> FCM --> APNs --> Mobile
+    PrioritySvc -->|email| EmailQ --> EmailWorker --> SES --> EmailInbox
+    PrioritySvc -->|sms| SMSQ --> SMSWorker --> Twilio --> Phone
+
+    PushWorker -.->|fail| RetryQ
+    EmailWorker -.->|fail| RetryQ
+    SMSWorker -.->|fail| RetryQ
+    RetryQ --> PushWorker
+    RetryQ -->|exceeded| DLQ
+
+    FCM -->|receipt| ReceiptSvc --> ReceiptDB
+    SES -->|webhook| ReceiptSvc
+    Twilio -->|status| ReceiptSvc
+
+    ReceiptSvc --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class PrefDB,TemplateDB,IdempDB,RLRedis,ReceiptDB storage
+    class Kafka,PushQ,EmailQ,SMSQ,PushWorker,EmailWorker,SMSWorker,RetryQ,DLQ async
+    class APNs edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Direct API call vs queue-based workers', rationale: 'Queue-based workers decouple notification production from delivery, enabling independent scaling, retry logic, and backpressure handling without blocking event producers.' },
     ],
@@ -961,14 +1370,82 @@ export const systemDesignProblems = [
       { section: 'Acknowledgment & Retry', content: 'Subscriber sends ACK with message ID. Broker advances the offset. If no ACK within ackDeadline (e.g., 30s), message is redelivered to another subscriber. After N retries, message goes to a Dead Letter Queue (DLQ).' },
       { section: 'Fan-out', content: 'Multiple subscriptions on one topic each get an independent cursor on the same underlying log. No data is duplicated — just the offset pointer is maintained per subscription.' },
     ],
-    diagram: `graph LR
-    Publisher -->|publish| API[Pub/Sub API]
-    API -->|append| Log[Distributed Log\npartitions]
-    Log -->|deliver| Sub1[Subscription A]
-    Log -->|deliver| Sub2[Subscription B]
-    Sub1 -->|ACK| API
-    Sub2 -->|ACK| API
-    Sub1 -->|fail N times| DLQ[Dead Letter Queue]`,
+    diagram: `graph TB
+    subgraph Clients
+        Pub1[Publisher A]
+        Pub2[Publisher B]
+        Sub1[Subscriber Service A]
+        Sub2[Subscriber Service B]
+        SubPush[Push Subscriber Webhook]
+    end
+    subgraph Gateway
+        APIGW[Pub Sub API]
+        AuthZ[Authn and IAM]
+        AdminAPI[Admin API Topics and Subs]
+    end
+    subgraph Services
+        Publisher[Publish Handler]
+        Router[Partition Router]
+        SubMgr[Subscription Manager]
+        OffsetSvc[Offset Tracker]
+        AckSvc[Ack and Lease Service]
+        Pusher[Push Delivery Service]
+        Puller[Pull Delivery Service]
+        DLQSvc[Dead Letter Router]
+    end
+    subgraph Async
+        P1[Partition 1 Log]
+        P2[Partition 2 Log]
+        P3[Partition 3 Log]
+        Retry[Redelivery Scheduler]
+        RetentionGC[Retention GC 7 days]
+    end
+    subgraph Storage
+        LogStore[(Distributed Log Disk)]
+        OffsetStore[(Subscription Offsets)]
+        TopicMeta[(Topic and Sub Registry)]
+        DLQStore[(Dead Letter Queue)]
+    end
+    subgraph Analytics
+        Metrics[Metrics Bus]
+        Lake[(Audit Lake)]
+    end
+
+    AdminAPI -->|create topic| TopicMeta
+    AdminAPI -->|create subscription| SubMgr --> TopicMeta
+
+    Pub1 -->|publish msg| APIGW --> AuthZ --> Publisher
+    Pub2 -->|publish ordered key| Publisher
+    Publisher --> Router
+    Router --> P1
+    Router --> P2
+    Router --> P3
+    P1 --> LogStore
+    P2 --> LogStore
+    P3 --> LogStore
+    Publisher -->|message id ack| Pub1
+
+    Sub1 -->|pull| Puller --> P1
+    Sub2 -->|pull| Puller --> P2
+    Puller --> OffsetSvc --> OffsetStore
+    Sub1 -->|ack id| AckSvc --> OffsetSvc
+
+    SubPush -->|push webhook| Pusher --> P3
+    Pusher --> SubPush
+
+    AckSvc -->|no ack timeout| Retry --> Puller
+    Retry -->|exceeded| DLQSvc --> DLQStore
+
+    LogStore --> RetentionGC
+    Publisher --> Metrics --> Lake
+    AckSvc --> Metrics
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class LogStore,OffsetStore,TopicMeta,DLQStore storage
+    class P1,P2,P3,Retry,RetentionGC async
+    class Metrics,Lake analytics`,
     tradeoffs: [
       { decision: 'Push vs pull delivery', rationale: 'Push is lower latency. Pull allows subscribers to control their consumption rate (backpressure), which is critical for slow consumers or bursty workloads.' },
     ],
@@ -994,13 +1471,86 @@ export const systemDesignProblems = [
       { section: 'Consumer Groups', content: 'Each partition is consumed by exactly one consumer within a group. Multiple groups can read the same topic independently. Kafka tracks committed offsets per (group, topic, partition) in an internal topic (__consumer_offsets).' },
       { section: 'Log Compaction', content: 'Kafka can run log compaction on a topic: keep only the latest message per key (useful for CDC/change data capture). Combine with time-based retention for mixed workloads.' },
     ],
-    diagram: `graph TD
-    Producer -->|write| Leader[Partition Leader\nBroker 1]
-    Leader -->|replicate| F1[Follower\nBroker 2]
-    Leader -->|replicate| F2[Follower\nBroker 3]
-    Consumer1[Consumer Group A] -->|read offset| Leader
-    Consumer2[Consumer Group B] -->|read offset| Leader
-    ZK[ZooKeeper / KRaft] -->|leader election| Leader`,
+    diagram: `graph TB
+    subgraph Clients
+        Prod1[Producer A]
+        Prod2[Producer B]
+        ConsA1[Consumer Group A Worker 1]
+        ConsA2[Consumer Group A Worker 2]
+        ConsB1[Consumer Group B Worker]
+        StreamApp[Stream Processor Flink]
+    end
+    subgraph Gateway
+        Bootstrap[Bootstrap Servers]
+        SchemaReg[Schema Registry]
+    end
+    subgraph Services
+        Broker1[Broker 1]
+        Broker2[Broker 2]
+        Broker3[Broker 3]
+        Controller[Controller KRaft]
+        GroupCoord[Group Coordinator]
+        ISR[ISR Tracker]
+    end
+    subgraph Async
+        P1Leader[Partition 1 Leader on B1]
+        P1F1[Partition 1 Follower B2]
+        P1F2[Partition 1 Follower B3]
+        P2Leader[Partition 2 Leader on B2]
+        Compaction[Log Compaction Job]
+        Retention[Retention Cleaner]
+        MirrorMaker[MirrorMaker Cross Cluster]
+    end
+    subgraph Storage
+        Segments1[(Topic Segments Disk B1)]
+        Segments2[(Topic Segments Disk B2)]
+        Segments3[(Topic Segments Disk B3)]
+        OffsetsTopic[(__consumer_offsets)]
+        MetaLog[(KRaft Metadata Log)]
+    end
+    subgraph Analytics
+        ConnectSink[Kafka Connect Sink]
+        Warehouse[(Warehouse)]
+    end
+
+    Prod1 -->|register schema| SchemaReg
+    Prod1 -->|produce acks all| Bootstrap --> P1Leader
+    Prod2 --> Bootstrap --> P2Leader
+
+    P1Leader --> Segments1
+    P1Leader -->|replicate| P1F1 --> Segments2
+    P1Leader -->|replicate| P1F2 --> Segments3
+    ISR --> P1Leader
+    ISR --> P1F1
+    ISR --> P1F2
+
+    Controller --> Broker1
+    Controller --> Broker2
+    Controller --> Broker3
+    Controller --> MetaLog
+    Controller -->|leader election| P1Leader
+
+    ConsA1 --> GroupCoord
+    ConsA2 --> GroupCoord
+    GroupCoord -->|partition assignment| ConsA1
+    GroupCoord -->|partition assignment| ConsA2
+    GroupCoord --> OffsetsTopic
+
+    ConsA1 -->|fetch offset| P1Leader
+    ConsA2 -->|fetch offset| P2Leader
+    ConsB1 -->|independent cursor| P1Leader
+    StreamApp -->|exactly once| P1Leader
+
+    Compaction --> Segments1
+    Retention --> Segments2
+    P1Leader --> MirrorMaker --> ConnectSink --> Warehouse
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class Segments1,Segments2,Segments3,OffsetsTopic,MetaLog storage
+    class P1Leader,P1F1,P1F2,P2Leader,Compaction,Retention,MirrorMaker async
+    class ConnectSink,Warehouse analytics`,
     tradeoffs: [
       { decision: 'acks=all vs acks=1', rationale: 'acks=all guarantees no data loss (waits for all ISR replicas). acks=1 is faster but risks data loss if leader fails before replication. Use acks=all for financial data.' },
     ],
@@ -1131,14 +1681,97 @@ export const systemDesignProblems = [
       { section: 'Group Messaging', content: 'Fan-out service expands a group message to individual messages for each member. For large groups, this fan-out is async via a queue. Each member\'s Chat Server gets the message for their connected members.' },
       { section: 'End-to-End Encryption', content: 'Signal Protocol: each user has a public/private key pair. Messages encrypted with recipient\'s public key on sender\'s device. Server stores and routes only ciphertext — cannot read messages.' },
     ],
-    diagram: `graph LR
-    UserA -->|WS| ChatA[Chat Server A]
-    UserB -->|WS| ChatB[Chat Server B]
-    ChatA -->|lookup| Registry[(Connection\nRegistry Redis)]
-    ChatA -->|forward| ChatB
-    ChatB -->|push| UserB
-    ChatA -->|offline| OfflineQ[(Offline Queue\nCassandra)]
-    OfflineQ -->|on reconnect| ChatB`,
+    diagram: `graph TB
+    subgraph Clients
+        UserA[User A Device]
+        UserB[User B Device]
+        GroupMember[Group Member Device]
+        WebSession[Web Companion]
+    end
+    subgraph Edge
+        GeoDNS[Geo-DNS]
+        WSLB[WebSocket Load Balancer]
+        CDN[Media CDN]
+    end
+    subgraph Gateway
+        APIGW[REST API Gateway]
+        Auth[Auth and Device Pairing]
+    end
+    subgraph Services
+        ChatA[Chat Server A]
+        ChatB[Chat Server B]
+        ChatC[Chat Server C]
+        Presence[Presence Service]
+        FanoutSvc[Group Fan-out Service]
+        ReceiptSvc[Delivery Receipt Service]
+        MediaSvc[Media Upload Service]
+        E2EE[E2EE Key Service Signal]
+        PushSvc[Push Gateway APNs FCM]
+        ContactSvc[Contact and Profile Svc]
+    end
+    subgraph Async
+        FanoutQ[Group Fan-out Queue]
+        MediaProc[Media Transcoder]
+        OfflineDeliver[Offline Delivery Job]
+        TombstoneGC[Delivered Message GC]
+    end
+    subgraph Storage
+        Registry[(Connection Registry Redis)]
+        OfflineQ[(Offline Queue Cassandra)]
+        UserDB[(User and Contacts DB)]
+        GroupDB[(Group Membership DB)]
+        KeyStore[(Public Key Store)]
+        MediaBlob[(Media Blob S3)]
+        ReceiptDB[(Read Receipts)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+    end
+
+    UserA -->|DNS| GeoDNS --> WSLB
+    UserA -->|WebSocket| ChatA
+    UserB -->|WebSocket| ChatB
+    GroupMember -->|WebSocket| ChatC
+    WebSession -->|WebSocket| ChatA
+
+    UserA -->|register pubkey| APIGW --> Auth --> E2EE --> KeyStore
+    APIGW --> ContactSvc --> UserDB
+
+    UserA -->|send 1-1 ciphertext| ChatA
+    ChatA --> Registry
+    ChatA -->|recipient on B| ChatB
+    ChatB --> UserB
+    ChatB -->|delivered| ReceiptSvc --> ReceiptDB
+    UserB -->|read| ReceiptSvc
+
+    ChatA -->|offline recipient| OfflineQ
+    OfflineQ --> OfflineDeliver --> ChatB
+
+    UserA -->|send group msg| ChatA --> FanoutSvc --> GroupDB
+    FanoutSvc --> FanoutQ --> ChatC
+    ChatC --> GroupMember
+
+    UserB -.->|typing presence| Presence --> Registry
+    Presence -->|broadcast| ChatA
+
+    UserA -->|upload media| MediaSvc --> MediaBlob
+    MediaSvc --> MediaProc --> MediaBlob
+    GroupMember -->|fetch media| CDN --> MediaBlob
+
+    ChatB -.->|app closed| PushSvc --> UserB
+
+    ChatA --> EventBus --> Lake
+    OfflineQ --> TombstoneGC
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class Registry,OfflineQ,UserDB,GroupDB,KeyStore,MediaBlob,ReceiptDB storage
+    class FanoutQ,MediaProc,OfflineDeliver,TombstoneGC async
+    class GeoDNS,WSLB,CDN edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Store messages on server vs client-only', rationale: 'Server-side storage enables multi-device sync and message history. Client-only (like Signal) maximizes privacy. WhatsApp stores messages temporarily on server until delivered, then deletes.' },
     ],
@@ -1164,15 +1797,84 @@ export const systemDesignProblems = [
       { section: 'Latency Reduction', content: 'Standard HLS has ~20–30s glass-to-glass latency because the player buffers 3 segments (each typically 6–10s) before playback begins. Low-Latency HLS (LL-HLS) uses 200ms partial segments pushed to CDN, reducing latency to ~2–3s. WebRTC can achieve <1s latency but does not scale to millions of viewers via CDN.' },
       { section: 'Live Chat', content: 'Chat messages go through a separate WebSocket-based chat service. Messages stored in Redis pub/sub and fanout to all connected viewers for that stream. Moderation bots scan messages asynchronously.' },
     ],
-    diagram: `graph LR
-    Streamer -->|RTMP| Ingest[Ingest Edge]
-    Ingest -->|HLS segments| Transcoder[Transcoder Farm]
-    Transcoder -->|segments| CDNOrigin[(CDN Origin)]
-    CDNOrigin --> CDNEdge[CDN Edge Nodes]
-    CDNEdge -->|HLS| Viewer
-    Viewer -->|chat msg| ChatSvc[Chat Service]
-    ChatSvc --> Redis[(Redis Pub/Sub)]
-    Redis -->|fanout| Viewer`,
+    diagram: `graph TB
+    subgraph Clients
+        Streamer[Streamer OBS]
+        Viewer[Viewer Web]
+        ViewerMobile[Viewer Mobile]
+        ChatUser[Chat Viewer]
+    end
+    subgraph Edge
+        IngestEdge[RTMP Ingest Edge]
+        CDNEdge[CDN Edge LL-HLS]
+        WSGateway[Chat WebSocket Gateway]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth and Streamer Keys]
+    end
+    subgraph Services
+        StreamMgr[Stream Manager]
+        TranscodeOrch[Transcoder Orchestrator]
+        ChatSvc[Chat Service]
+        ModSvc[Chat Moderation]
+        VODSvc[VOD Recorder]
+        CatalogSvc[Live Catalog and Discovery]
+        DRMSvc[Token and DRM Service]
+        SubBilling[Subscription and Bits Svc]
+    end
+    subgraph Async
+        TranscoderFarm[Transcoder Workers 160 to 1080p]
+        ManifestUpd[Manifest Updater]
+        ChatPubSub[Chat Redis Pub Sub]
+        ModBot[Async Moderation Bot]
+        ThumbGen[Thumbnail Generator]
+    end
+    subgraph Storage
+        CDNOrigin[(CDN Origin Segments)]
+        VODBlob[(VOD Archive S3)]
+        StreamMeta[(Stream Metadata DB)]
+        ChatHistory[(Chat History Cassandra)]
+        UserDB[(User DB)]
+        DRMTokens[(DRM Token Store)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Watch Events]
+        Lake[(Data Lake)]
+    end
+
+    Streamer -->|RTMP push| IngestEdge --> StreamMgr --> StreamMeta
+    StreamMgr --> TranscodeOrch --> TranscoderFarm --> CDNOrigin
+    TranscoderFarm --> ManifestUpd --> CDNOrigin
+    TranscoderFarm --> ThumbGen --> CDNOrigin
+    CDNOrigin --> VODSvc --> VODBlob
+
+    Viewer -->|browse live| APIGW --> CatalogSvc --> StreamMeta
+    Viewer -->|play stream| APIGW --> DRMSvc --> DRMTokens
+    Viewer -->|fetch manifest| CDNEdge
+    ViewerMobile -->|partial segments LL-HLS| CDNEdge
+    CDNEdge -->|origin miss| CDNOrigin
+
+    ChatUser -->|chat msg| WSGateway --> ChatSvc
+    ChatSvc --> ChatPubSub
+    ChatPubSub -->|fanout| WSGateway --> Viewer
+    ChatSvc --> ChatHistory
+    ChatSvc --> ModSvc --> ModBot
+    ModBot --> ChatSvc
+
+    Viewer -->|cheer or sub| APIGW --> SubBilling --> UserDB
+
+    Viewer -->|watch event| EventBus
+    StreamMgr --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class CDNOrigin,VODBlob,StreamMeta,ChatHistory,UserDB,DRMTokens storage
+    class TranscoderFarm,ManifestUpd,ChatPubSub,ModBot,ThumbGen async
+    class IngestEdge,CDNEdge,WSGateway edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'HLS vs WebRTC for delivery', rationale: 'HLS scales to millions of viewers via CDN. WebRTC achieves sub-second latency but requires peer-to-peer or SFU infrastructure that does not scale beyond ~100K viewers per stream efficiently.' },
     ],
@@ -1198,15 +1900,82 @@ export const systemDesignProblems = [
       { section: 'Politeness & robots.txt', content: 'Fetch and cache robots.txt per domain (TTL 24h). Enforce crawl-delay from robots.txt or default to 1 req/sec. Use a token bucket per domain. Respect Disallow directives before fetching any page.' },
       { section: 'Content Storage', content: 'Raw HTML stored in S3. A fingerprint (SimHash) of the content stored in a DB to detect near-duplicate pages. Parsed content passed to an indexing pipeline via Kafka.' },
     ],
-    diagram: `graph LR
-    Seeds[Seed URLs] --> Frontier[URL Frontier\nKafka + Redis]
-    Frontier -->|URL| Workers[Crawler Workers]
-    Workers -->|robots.txt check| RobotsCache[(Robots Cache\nRedis)]
-    Workers -->|fetch| Web[Web]
-    Web -->|HTML| Workers
-    Workers -->|store| S3[(S3 Raw HTML)]
-    Workers -->|extract links| Dedup[Dedup Check\nBloom Filter]
-    Dedup -->|new URLs| Frontier`,
+    diagram: `graph TB
+    subgraph Clients
+        Seeds[Seed URL List]
+        Sitemap[Sitemap Submitter]
+        Web[Public Web]
+    end
+    subgraph Edge
+        DNSCache[DNS Resolver Cache]
+        FetcherEgress[Egress Pool Many IPs]
+    end
+    subgraph Gateway
+        SchedAPI[Crawl Control API]
+    end
+    subgraph Services
+        FrontierMgr[Frontier Manager]
+        Politeness[Politeness Token Bucket]
+        RobotsSvc[Robots.txt Service]
+        Fetcher[HTTP Fetcher Workers]
+        Parser[HTML Parser and Link Extractor]
+        Dedup[URL Dedup Bloom and Set]
+        SimHashSvc[SimHash Near Dup Detector]
+        PRankSvc[PageRank Estimator]
+        IndexFeeder[Indexing Pipeline Feeder]
+    end
+    subgraph Async
+        FrontierQ[URL Frontier Kafka]
+        DomainQ[Per Domain Queue Redis]
+        ContentQ[Parsed Content Topic]
+        RecrawlSched[Recrawl Scheduler]
+    end
+    subgraph Storage
+        BloomStore[(Bloom Filter)]
+        SeenSet[(Seen URLs Cassandra)]
+        RobotsCache[(Robots Cache Redis)]
+        RawHTML[(Raw HTML S3)]
+        FingerprintDB[(SimHash DB)]
+        DomainPRank[(Domain PageRank Store)]
+    end
+    subgraph Analytics
+        EventBus[Crawl Metrics Bus]
+        Lake[(Data Lake)]
+    end
+
+    Seeds --> SchedAPI --> FrontierMgr --> FrontierQ
+    Sitemap --> SchedAPI
+
+    FrontierQ --> DomainQ --> Fetcher
+    Fetcher --> Politeness
+    Fetcher --> RobotsSvc --> RobotsCache
+    Fetcher --> DNSCache
+    Fetcher --> FetcherEgress
+    FetcherEgress -->|GET page| Web --> Fetcher
+
+    Fetcher -->|store| RawHTML
+    Fetcher --> Parser
+    Parser --> ContentQ --> IndexFeeder
+    Parser --> SimHashSvc --> FingerprintDB
+
+    Parser -->|extract links| Dedup
+    Dedup --> BloomStore
+    Dedup --> SeenSet
+    Dedup -->|new URLs| FrontierMgr
+
+    PRankSvc --> DomainPRank --> FrontierMgr
+    RecrawlSched --> FrontierQ
+
+    Fetcher --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class BloomStore,SeenSet,RobotsCache,RawHTML,FingerprintDB,DomainPRank storage
+    class FrontierQ,DomainQ,ContentQ,RecrawlSched async
+    class DNSCache,FetcherEgress edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'BFS vs priority crawl', rationale: 'BFS treats all URLs equally. Priority crawl (Mercator-style) prioritizes high-PageRank or frequently updated pages. Priority crawl produces a better index with the same compute budget.' },
     ],
@@ -1232,12 +2001,74 @@ export const systemDesignProblems = [
       { section: 'Sequence Number', content: '12-bit counter incremented per ID within the same millisecond. Resets to 0 on the next millisecond. If the sequence overflows (>4,095 IDs in one ms), the generator waits for the next millisecond.' },
       { section: 'Clock Skew Handling', content: 'If system clock goes backwards (NTP adjustment), IDs could duplicate. Mitigation: detect clock going backwards and wait for time to catch up. Log and alert on clock skew > 10ms.' },
     ],
-    diagram: `graph LR
-    Svc[Service] -->|request ID| IDGen[ID Generator Node]
-    IDGen -->|get machine ID once| ZK[ZooKeeper]
-    IDGen -->|compose bits| ID[64-bit Snowflake ID]
-    ID --> Svc
-    Note[41-bit timestamp\n10-bit machine ID\n12-bit sequence] -.-> ID`,
+    diagram: `graph TB
+    subgraph Clients
+        TweetSvc[Tweet Service]
+        OrderSvc[Order Service]
+        PaymentSvc[Payment Service]
+        BatchJob[Batch Job]
+    end
+    subgraph Gateway
+        SDK[ID Generator SDK]
+        LB[Load Balancer]
+    end
+    subgraph Services
+        IDGen1[ID Generator Node 1]
+        IDGen2[ID Generator Node 2]
+        IDGen3[ID Generator Node N]
+        Composer[Bit Composer 41 ts 10 machine 12 seq]
+        ClockGuard[Clock Skew Detector]
+        SeqCounter[Per ms Sequence Counter]
+        BootstrapSvc[Machine ID Bootstrap]
+    end
+    subgraph Async
+        AlertJob[Clock Skew Alert]
+        NTPSync[NTP Sync Daemon]
+        MetricsAgg[Throughput Metrics]
+    end
+    subgraph Storage
+        ZK[(ZooKeeper Machine ID Registry)]
+        EpochCfg[(Custom Epoch Config)]
+        SkewLog[(Skew Event Log)]
+    end
+    subgraph Analytics
+        EventBus[Metrics Bus]
+        Dash[Grafana Dashboards]
+    end
+
+    TweetSvc --> SDK
+    OrderSvc --> SDK
+    PaymentSvc --> SDK
+    BatchJob -->|bulk allocate| SDK
+
+    SDK --> LB
+    LB --> IDGen1
+    LB --> IDGen2
+    LB --> IDGen3
+
+    IDGen1 --> BootstrapSvc --> ZK
+    IDGen2 --> BootstrapSvc
+    IDGen3 --> BootstrapSvc
+
+    IDGen1 --> ClockGuard --> NTPSync
+    IDGen1 --> Composer --> SeqCounter
+    Composer --> EpochCfg
+
+    ClockGuard -->|backwards| AlertJob --> SkewLog
+    AlertJob --> EventBus --> Dash
+    IDGen1 --> MetricsAgg --> EventBus
+
+    Composer -->|64-bit Snowflake ID| SDK
+    SDK --> TweetSvc
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class ZK,EpochCfg,SkewLog storage
+    class AlertJob,NTPSync,MetricsAgg async
+    class LB edge
+    class EventBus,Dash analytics`,
     tradeoffs: [
       { decision: 'Snowflake vs UUID v4', rationale: 'Snowflake IDs are time-sortable (better for B-tree DB indexes), shorter (64 vs 128 bits), and human-debuggable (timestamp is extractable). UUID v4 needs no coordination service at all but is not sortable.' },
     ],
@@ -1263,13 +2094,70 @@ export const systemDesignProblems = [
       { section: 'Node Removal', content: 'Reverse of addition. The removed node\'s key ranges are transferred to the next clockwise nodes. Again, only ~1/N keys are affected. Ring position table is updated in the cluster\'s metadata store.' },
       { section: 'Implementation', content: 'Store ring as a sorted array of (hash_value, node_id) pairs. Lookup = binary search for first position >= key_hash. O(log N) time. Additions/removals update the sorted array and trigger key migration for affected ranges.' },
     ],
-    diagram: `graph TD
-    Ring[Hash Ring 0 to 2^32]
-    Ring --> A[Node A\nhash pos 10]
-    Ring --> B[Node B\nhash pos 40]
-    Ring --> C[Node C\nhash pos 70]
-    Ring --> A2[Node A vnode\nhash pos 85]
-    Key[Key K\nhash pos 50] -->|clockwise| C`,
+    diagram: `graph TB
+    subgraph Clients
+        AppClient[Application Client]
+        SDK[Smart Client SDK]
+    end
+    subgraph Gateway
+        Hasher[Hash Function MurmurHash3]
+        Lookup[Ring Lookup Binary Search]
+    end
+    subgraph Services
+        Ring[Hash Ring 0 to 2 to the 32]
+        NodeA[Node A vnodes 150]
+        NodeB[Node B vnodes 150]
+        NodeC[Node C vnodes 150]
+        NodeD[Node D newly added]
+        Membership[Membership and Gossip]
+        Rebalancer[Range Rebalancer]
+    end
+    subgraph Async
+        Migrate[Key Migration Stream]
+        HintedHandoff[Hinted Handoff Queue]
+        VnodeBalancer[Vnode Load Balancer]
+    end
+    subgraph Storage
+        RingTable[(Sorted Ring Position Table)]
+        ClusterMeta[(Cluster Metadata Store)]
+        KeyShardA[(Keys on A)]
+        KeyShardB[(Keys on B)]
+        KeyShardC[(Keys on C)]
+    end
+
+    AppClient --> SDK --> Hasher
+    Hasher --> Lookup --> Ring
+    Ring --> NodeA
+    Ring --> NodeB
+    Ring --> NodeC
+
+    NodeA --> KeyShardA
+    NodeB --> KeyShardB
+    NodeC --> KeyShardC
+
+    Lookup -->|GET key| NodeC
+    Lookup -->|PUT key| NodeA
+    Lookup -->|N replicas clockwise| NodeB
+
+    Membership --> Ring
+    Membership --> ClusterMeta
+    Ring --> RingTable
+
+    NodeD -.->|join| Membership
+    Membership --> Rebalancer
+    Rebalancer --> Migrate
+    Migrate --> NodeA
+    Migrate --> NodeD
+    NodeD --> KeyShardA
+
+    NodeC -.->|leave or fail| Membership
+    Membership --> HintedHandoff --> NodeA
+    VnodeBalancer --> Ring
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    class RingTable,ClusterMeta,KeyShardA,KeyShardB,KeyShardC storage
+    class Migrate,HintedHandoff,VnodeBalancer async`,
     tradeoffs: [
       { decision: '150 vnodes vs fewer', rationale: 'More vnodes means better load balance and smaller key migration on node changes, but higher memory overhead in the ring table and more complex migration coordination.' },
     ],
@@ -1295,14 +2183,74 @@ export const systemDesignProblems = [
       { section: 'Sequencer Nodes (ZooKeeper Pattern)', content: 'ZooKeeper-style: clients create ephemeral sequential nodes under a lock path. The node with the lowest sequence number holds the lock. Others watch the node immediately before them. On deletion, the next node gets notified — no thundering herd.' },
       { section: 'RedLock (Redis)', content: 'Redis-based: acquire lock on majority (N/2+1) of N independent Redis nodes using SET NX PX. Considered safe if clock drift < TTL/3. Controversial — Martin Kleppmann argues it is not safe under GC pauses. Use Raft-based locks for correctness-critical scenarios.' },
     ],
-    diagram: `graph LR
-    Client -->|acquire lock| LockSvc[Lock Service\nRaft Cluster]
-    LockSvc -->|write to majority| N1[Node 1 Leader]
-    N1 --> N2[Node 2 Follower]
-    N1 --> N3[Node 3 Follower]
-    LockSvc -->|fencing token| Client
-    Client -->|token + request| Resource[Protected Resource]
-    Resource -->|validate token| Resource`,
+    diagram: `graph TB
+    subgraph Clients
+        ClientA[Worker A]
+        ClientB[Worker B]
+        ClientC[Worker C]
+    end
+    subgraph Gateway
+        LockSDK[Lock SDK]
+        LB[Load Balancer]
+    end
+    subgraph Services
+        LockSvc[Lock Service API]
+        RaftLeader[Raft Leader]
+        RaftF1[Raft Follower 1]
+        RaftF2[Raft Follower 2]
+        SeqNode[Sequential Node Manager]
+        FencingSvc[Fencing Token Issuer]
+        LeaseSvc[Lease Renewal Service]
+        Watcher[Watch Notifier]
+    end
+    subgraph Async
+        LeaseExpiry[Lease Expiry Sweeper]
+        ElectionJob[Leader Election]
+        SnapshotJob[Raft Snapshot]
+    end
+    subgraph Storage
+        RaftLog[(Replicated Raft Log)]
+        LockState[(Lock State KV)]
+        TokenCounter[(Monotonic Fencing Counter)]
+        Snapshot[(Snapshot Store)]
+    end
+    subgraph Services2 [Protected Resource]
+        Resource[Database or Inventory]
+        ResourceGuard[Token Validator]
+    end
+
+    ClientA --> LockSDK --> LB --> LockSvc
+    ClientB --> LockSDK
+    ClientC --> LockSDK
+
+    LockSvc -->|acquire| RaftLeader
+    RaftLeader --> RaftLog
+    RaftLeader -->|replicate| RaftF1
+    RaftLeader -->|replicate| RaftF2
+    RaftLeader --> LockState
+    RaftLeader --> FencingSvc --> TokenCounter
+
+    LockSvc -->|sequential ephemeral| SeqNode
+    SeqNode --> Watcher
+    Watcher --> ClientB
+
+    LockSvc -->|fencing token| ClientA
+    ClientA -->|request with token| ResourceGuard --> Resource
+    ResourceGuard -->|reject stale| ClientA
+
+    ClientA -->|renew lease| LeaseSvc --> RaftLeader
+    LeaseExpiry --> LockState
+    LeaseExpiry -->|release| Watcher
+
+    ElectionJob --> RaftLeader
+    SnapshotJob --> Snapshot
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    class RaftLog,LockState,TokenCounter,Snapshot storage
+    class LeaseExpiry,ElectionJob,SnapshotJob async
+    class LB edge`,
     tradeoffs: [
       { decision: 'Raft-based vs Redis RedLock', rationale: 'Raft guarantees correctness under all failure modes including GC pauses and clock drift. RedLock is simpler to deploy but has documented safety gaps. Use Raft for financial/inventory systems.' },
     ],
@@ -1328,14 +2276,94 @@ export const systemDesignProblems = [
       { section: 'Ranking (PageRank + ML)', content: 'Base relevance: BM25 TF-IDF. PageRank computed offline via iterative graph algorithm (each page\'s rank flows to outbound links). ML ranking model (BERT-based, trained on click data) reranks the top-K candidates at query time.' },
       { section: 'Serving Tier', content: 'Query hits a root server, which fans out to hundreds of leaf index servers in parallel. Each leaf returns its local top-K. Root merges all results, applies global ranking, fetches document snippets, returns top 10.' },
     ],
-    diagram: `graph TD
-    Crawler[Web Crawler] -->|HTML| BlobStore[(Blob Storage)]
-    BlobStore -->|MapReduce| Indexer[Index Builder]
-    Indexer -->|shards| IndexServers[Index Shard Servers]
-    Query[User Query] --> Root[Root Server]
-    Root -->|fan-out| IndexServers
-    IndexServers -->|top K| Root
-    Root -->|ranked results| Query`,
+    diagram: `graph TB
+    subgraph Clients
+        Browser[Browser]
+        MobileApp[Mobile App]
+        VoiceSearch[Voice Search]
+    end
+    subgraph Edge
+        CDN[Global Edge Cache]
+        GeoDNS[Geo-DNS]
+    end
+    subgraph Gateway
+        APIGW[Search Frontend]
+        AntiSpam[Spam and Bot Filter]
+    end
+    subgraph Services
+        QueryParser[Query Parser and Tokenizer]
+        SpellCheck[Spell Correction]
+        Autosug[Autosuggest Service]
+        Root[Root Aggregator]
+        IndexLeaf1[Index Leaf Shard 1]
+        IndexLeaf2[Index Leaf Shard 2]
+        IndexLeafN[Index Leaf Shard N]
+        BM25[BM25 Scorer]
+        MLRanker[BERT Reranker]
+        Snippets[Snippet Builder]
+        AdServer[Ads Server]
+    end
+    subgraph Async
+        Crawler[Distributed Crawler]
+        Indexer[Index Builder MapReduce]
+        PageRankJob[PageRank Iterative]
+        Incremental[Incremental Indexer]
+        ClickLog[Click Log Pipeline]
+    end
+    subgraph Storage
+        BlobStore[(Crawled HTML S3)]
+        InvIdx1[(Inverted Index Shard 1)]
+        InvIdx2[(Inverted Index Shard 2)]
+        InvIdxN[(Inverted Index Shard N)]
+        DocStore[(Doc and Snippet Store)]
+        PRStore[(PageRank Scores)]
+        QueryCache[(Hot Query Cache)]
+    end
+    subgraph Analytics
+        EventBus[Search Events]
+        Lake[(Data Lake)]
+        ModelStore[ML Model Store]
+    end
+
+    Browser -->|query| GeoDNS --> CDN --> APIGW
+    MobileApp --> APIGW
+    VoiceSearch --> APIGW
+    APIGW --> AntiSpam
+    APIGW --> Autosug
+
+    APIGW --> QueryParser --> SpellCheck
+    QueryParser --> QueryCache
+    QueryCache -.->|miss| Root
+
+    Root -->|fan-out| IndexLeaf1 --> InvIdx1
+    Root -->|fan-out| IndexLeaf2 --> InvIdx2
+    Root -->|fan-out| IndexLeafN --> InvIdxN
+    IndexLeaf1 --> BM25 --> Root
+    Root --> MLRanker --> ModelStore
+    MLRanker --> Snippets --> DocStore
+    Snippets --> APIGW --> Browser
+    Root --> PRStore
+
+    APIGW --> AdServer
+
+    Crawler --> BlobStore
+    BlobStore --> Indexer
+    Indexer --> InvIdx1
+    Indexer --> InvIdx2
+    BlobStore --> PageRankJob --> PRStore
+    Incremental --> InvIdx1
+
+    Browser -->|click| ClickLog --> EventBus --> Lake
+    Lake --> ModelStore
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class BlobStore,InvIdx1,InvIdx2,InvIdxN,DocStore,PRStore,QueryCache storage
+    class Crawler,Indexer,PageRankJob,Incremental,ClickLog async
+    class CDN,GeoDNS edge
+    class EventBus,Lake,ModelStore analytics`,
     tradeoffs: [
       { decision: 'Batch index rebuild vs incremental indexing', rationale: 'Batch rebuild (MapReduce) is simpler but slow to reflect new content. Incremental indexing (streaming) keeps the index fresh but is harder to implement correctly. Modern search engines use a hybrid.' },
     ],
@@ -1361,16 +2389,83 @@ export const systemDesignProblems = [
       { section: 'Caching Layer', content: 'In-memory cache (Redis) for the most popular prefixes (top 10K). Cache hit rate >90%. Cache updated asynchronously when scores change. Cache first, trie fallback for cache misses.' },
       { section: 'Real-time Trending', content: 'Stream search logs through Kafka. A streaming job (Flink) aggregates counts over a 1-hour sliding window. Top trending queries injected into the suggestion layer with a boost factor.' },
     ],
-    diagram: `graph LR
-    User -->|type prefix| API[Suggestion API]
-    API --> Cache[(Redis Cache\ntop 10K prefixes)]
-    Cache -->|miss| TrieServer[Trie Servers]
-    TrieServer -->|top 5| API
-    API --> User
-    SearchLogs[Search Logs] --> Kafka[Kafka]
-    Kafka --> Spark[Batch Scoring\nSpark]
-    Spark -->|rebuild trie| S3[(Trie Snapshot S3)]
-    S3 -->|load| TrieServer`,
+    diagram: `graph TB
+    subgraph Clients
+        Browser[Browser Search Box]
+        Mobile[Mobile App]
+        Voice[Voice Assistant]
+    end
+    subgraph Edge
+        CDN[CDN Edge]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Suggestion API]
+        RL[Rate Limiter]
+    end
+    subgraph Services
+        Router[Prefix Shard Router]
+        TrieShardA[Trie Server Shard A]
+        TrieShardB[Trie Server Shard B]
+        TrieShardC[Trie Server Shard C]
+        Personalizer[Personalization Layer]
+        LangSvc[Language Router]
+        TrendBoost[Trending Booster]
+    end
+    subgraph Async
+        Kafka[Search Log Stream]
+        SparkBatch[Spark Batch Scoring]
+        FlinkStream[Flink Sliding Window]
+        TrieBuilder[Trie Snapshot Builder]
+        CacheWarmer[Hot Prefix Cache Warmer]
+    end
+    subgraph Storage
+        HotCache[(Redis Top 10K Prefixes)]
+        TrieSnapshot[(Trie Snapshot S3)]
+        FreqDB[(Frequency Score DB)]
+        TrendStore[(Trending Counts Redis)]
+        UserProfile[(User History Store)]
+    end
+    subgraph Analytics
+        EventBus[Query Events Bus]
+        Lake[(Data Lake)]
+    end
+
+    Browser -->|type prefix| CDN --> LB --> APIGW
+    Mobile --> APIGW
+    Voice --> APIGW
+    APIGW --> RL
+    APIGW --> LangSvc
+    APIGW --> HotCache
+    HotCache -->|miss| Router
+    Router --> TrieShardA
+    Router --> TrieShardB
+    Router --> TrieShardC
+    TrieShardA --> TrieSnapshot
+    TrieShardA --> Personalizer --> UserProfile
+    TrieShardA --> TrendBoost --> TrendStore
+    Personalizer --> APIGW
+    APIGW --> Browser
+
+    Browser -->|search submitted| EventBus --> Kafka
+    Kafka --> SparkBatch --> FreqDB
+    FreqDB --> TrieBuilder --> TrieSnapshot
+    TrieSnapshot --> TrieShardA
+    TrieSnapshot --> TrieShardB
+    TrieSnapshot --> TrieShardC
+
+    Kafka --> FlinkStream --> TrendStore
+    EventBus --> Lake
+    HotCache --> CacheWarmer
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class HotCache,TrieSnapshot,FreqDB,TrendStore,UserProfile storage
+    class Kafka,SparkBatch,FlinkStream,TrieBuilder,CacheWarmer async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Trie vs inverted index for autocomplete', rationale: 'Trie lookup by prefix is O(prefix_length) — extremely fast. Inverted index is better for mid-string search. For prefix autocomplete, trie wins; for fuzzy/substring, use Elasticsearch.' },
     ],
@@ -1396,16 +2491,87 @@ export const systemDesignProblems = [
       { section: 'Personalized Ranking', content: 'Base ranking: BM25 + business rules (promoted products, in-stock penalty). Personalization layer: re-rank top-200 results using a learned ranking model (LambdaMART or two-tower neural model) trained on click/purchase data. Applied per user in < 50ms.' },
       { section: 'Index Updates', content: 'Product catalog changes flow through Kafka. An indexing consumer reads events and calls Elasticsearch bulk API. Price/inventory changes indexed within 5 minutes. New product launches indexed immediately.' },
     ],
-    diagram: `graph LR
-    User -->|search query| SearchAPI[Search API]
-    SearchAPI -->|ES query| ES[Elasticsearch Cluster]
-    ES -->|results + facets| SearchAPI
-    SearchAPI -->|rerank| RankingModel[Personalization Model]
-    RankingModel -->|reranked| SearchAPI
-    SearchAPI --> User
-    Catalog[Product Catalog] --> Kafka[Kafka]
-    Kafka --> Indexer[Index Consumer]
-    Indexer --> ES`,
+    diagram: `graph TB
+    subgraph Clients
+        Shopper[Web Shopper]
+        MobileApp[Mobile App]
+        VoiceAssist[Voice Search]
+    end
+    subgraph Edge
+        CDN[CDN Static Assets]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Search API]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        QueryParser[Query Parser]
+        AutoSug[Autocomplete Service]
+        ESCluster[Elasticsearch Cluster]
+        FacetSvc[Facet Aggregation]
+        Ranker[LambdaMART Reranker]
+        TwoTower[Two Tower Neural Model]
+        BizRules[Business Rules and Promotions]
+        InventoryCheck[In Stock Filter]
+        SpellSvc[Spell Suggester]
+    end
+    subgraph Async
+        Kafka[Catalog Change Events]
+        BulkIndexer[Bulk Index Consumer]
+        ClickStream[Click and Purchase Stream]
+        ModelTrainer[Ranking Model Trainer]
+        PriceUpdate[Price Inventory Updater]
+    end
+    subgraph Storage
+        ESIndex[(Elasticsearch Index 20 shards)]
+        Catalog[(Product Catalog DB)]
+        UserProfile[(User Click History)]
+        FilterCache[(Filter Bitset Cache)]
+        ModelStore[(Ranking Model Store)]
+        InventoryDB[(Inventory DB)]
+    end
+    subgraph Analytics
+        EventBus[Behavioral Events]
+        Lake[(Data Lake)]
+        FeatureStore[Feature Store]
+    end
+
+    Shopper -->|keyword| CDN --> LB --> APIGW
+    MobileApp --> APIGW
+    VoiceAssist --> APIGW
+
+    APIGW --> Auth
+    APIGW --> AutoSug
+    APIGW --> SpellSvc
+    APIGW --> QueryParser --> ESCluster --> ESIndex
+    ESCluster --> FilterCache
+    ESCluster --> FacetSvc
+    FacetSvc --> APIGW
+
+    ESCluster -->|top 200| Ranker
+    Ranker --> TwoTower --> FeatureStore
+    Ranker --> UserProfile
+    Ranker --> BizRules
+    Ranker --> InventoryCheck --> InventoryDB
+    Ranker --> APIGW
+    APIGW --> Shopper
+
+    Catalog --> Kafka --> BulkIndexer --> ESCluster
+    InventoryDB --> PriceUpdate --> ESCluster
+
+    Shopper -->|click or buy| ClickStream --> EventBus
+    EventBus --> Lake --> ModelTrainer --> ModelStore --> Ranker
+    Lake --> FeatureStore
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class ESIndex,Catalog,UserProfile,FilterCache,ModelStore,InventoryDB storage
+    class Kafka,BulkIndexer,ClickStream,ModelTrainer,PriceUpdate async
+    class CDN,LB edge
+    class EventBus,Lake,FeatureStore analytics`,
     tradeoffs: [
       { decision: 'Elasticsearch vs custom inverted index', rationale: 'Elasticsearch provides out-of-the-box faceting, fuzzy matching, aggregations, and horizontal scaling. A custom index can be faster for specific queries but requires years of engineering. Use Elasticsearch unless you outgrow it.' },
     ],
@@ -1431,15 +2597,103 @@ export const systemDesignProblems = [
       { section: 'PSP Integration', content: 'Actual card processing delegated to a Payment Service Provider (Stripe, Adyen). System stores a PSP-provided token, not raw card numbers (PCI compliance). PSP webhooks update local payment status.' },
       { section: 'Reconciliation', content: 'Nightly reconciliation job compares internal ledger with PSP settlement files. Any discrepancy triggers an alert. Separate settlement service handles payouts to merchants with configurable delay (e.g., T+2).' },
     ],
-    diagram: `graph LR
-    Client -->|pay + idempotency key| API[Payment API]
-    API -->|check| IdempDB[(Idempotency\nDB)]
-    IdempDB -->|new| Processor[Payment Processor]
-    Processor -->|charge| PSP[PSP Stripe/Adyen]
-    PSP -->|result| Processor
-    Processor -->|ledger entries| Ledger[(Ledger DB\nAppend-only)]
-    PSP -->|webhook| StatusSvc[Status Service]
-    StatusSvc -->|update state| Ledger`,
+    diagram: `graph TB
+    subgraph Clients
+        Merchant[Merchant API]
+        Checkout[Checkout Page]
+        MobileSDK[Mobile SDK]
+    end
+    subgraph Edge
+        WAF[WAF and DDoS Shield]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Payment API]
+        Auth[Auth and API Keys]
+        IdempCheck[Idempotency Middleware]
+    end
+    subgraph Services
+        Authorize[Authorization Service]
+        Capture[Capture Service]
+        Refund[Refund Service]
+        Dispute[Dispute and Chargeback Svc]
+        Payout[Merchant Payout Service]
+        Fraud[Fraud and Risk Scoring]
+        Tokenize[Tokenization Service]
+        StateMachine[Payment State Machine]
+        WebhookSvc[Webhook Dispatcher]
+        SettleSvc[Settlement Service]
+    end
+    subgraph Async
+        Recon[Nightly Reconciliation Job]
+        RetryQ[Failed Webhook Retry]
+        FraudTrainer[Fraud Model Trainer]
+        PayoutBatch[T+2 Payout Batcher]
+        DLQ[Dead Letter Queue]
+    end
+    subgraph Services2 [PSPs]
+        Stripe[PSP Stripe]
+        Adyen[PSP Adyen]
+        BankRail[ACH and Wire Rails]
+    end
+    subgraph Storage
+        IdempDB[(Idempotency Key Store)]
+        Ledger[(Double Entry Ledger Append Only)]
+        TxnDB[(Transaction State DB)]
+        FraudFeatures[(Fraud Feature Store)]
+        VaultPCI[(Tokenized Card Vault PCI)]
+        MerchantDB[(Merchant Accounts)]
+        AuditLog[(Audit Trail)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Payment Events]
+        Lake[(Data Lake)]
+    end
+
+    Checkout --> WAF --> LB --> APIGW
+    Merchant --> APIGW
+    MobileSDK --> APIGW
+    APIGW --> Auth
+    APIGW --> IdempCheck --> IdempDB
+
+    APIGW -->|charge| Authorize
+    Authorize --> Fraud --> FraudFeatures
+    Authorize --> Tokenize --> VaultPCI
+    Authorize --> Stripe
+    Stripe --> Authorize
+    Authorize --> StateMachine --> TxnDB
+    Authorize --> Ledger
+    Authorize --> Capture --> Adyen
+
+    APIGW -->|refund| Refund --> Ledger
+    Refund --> Stripe
+
+    APIGW -->|dispute| Dispute --> Ledger
+    Stripe -->|chargeback webhook| WebhookSvc --> Dispute
+
+    SettleSvc --> BankRail
+    PayoutBatch --> Payout --> BankRail
+    Payout --> MerchantDB
+
+    Stripe -->|webhook| WebhookSvc --> StateMachine
+    WebhookSvc -->|fail| RetryQ --> WebhookSvc
+    RetryQ -->|exceeded| DLQ
+
+    Ledger --> Recon
+    Recon --> Stripe
+    Recon --> Adyen
+    Recon --> AuditLog
+
+    Authorize --> EventBus --> Lake --> FraudTrainer --> FraudFeatures
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class IdempDB,Ledger,TxnDB,FraudFeatures,VaultPCI,MerchantDB,AuditLog storage
+    class Recon,RetryQ,FraudTrainer,PayoutBatch,DLQ async
+    class WAF,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Synchronous PSP call vs async queue', rationale: 'Synchronous call gives the user an immediate result but ties up a thread per payment. Async queue decouples throughput but requires status polling or webhooks. Most payment UIs prefer synchronous for UX.' },
     ],
@@ -1465,15 +2719,95 @@ export const systemDesignProblems = [
       { section: 'Two-Phase Reservation', content: 'HOLD: reserve room with 10-minute TTL (user must complete payment). CONFIRM: on successful payment, confirm reservation and remove TTL. RELEASE: if payment not received within TTL, release the hold. Prevents rooms being blocked indefinitely.' },
       { section: 'Search Service', content: 'Separate read-optimized search index (Elasticsearch). Hotel inventory replicated to ES via change data capture (Debezium). Search results may be slightly stale (acceptable). Actual availability check done against the source DB at booking time.' },
     ],
-    diagram: `graph LR
-    User -->|search| SearchSvc[Search Service]
-    SearchSvc --> ES[(Elasticsearch)]
-    User -->|book room| BookingSvc[Booking Service]
-    BookingSvc -->|check + lock| InventoryDB[(Inventory DB\nPostgreSQL)]
-    BookingSvc -->|payment| PaymentSvc[Payment Service]
-    PaymentSvc -->|confirm| BookingSvc
-    BookingSvc -->|confirm| InventoryDB
-    InventoryDB -->|CDC| ES`,
+    diagram: `graph TB
+    subgraph Clients
+        Traveler[Traveler Web]
+        Mobile[Mobile App]
+        HotelMgr[Hotel Manager Console]
+    end
+    subgraph Edge
+        CDN[CDN Static Assets]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth Service]
+        RL[Rate Limiter]
+    end
+    subgraph Services
+        SearchSvc[Search Service]
+        AvailSvc[Availability Service]
+        BookingSvc[Booking Service]
+        HoldSvc[Two Phase Hold Service]
+        ConfirmSvc[Confirmation Service]
+        CancelSvc[Cancel and Refund Service]
+        PaymentSvc[Payment Service]
+        PricingSvc[Dynamic Pricing]
+        InventoryMgr[Hotel Inventory Management]
+        ReviewSvc[Reviews Service]
+        NotifySvc[Email and Push Notifier]
+    end
+    subgraph Async
+        CDCStream[Inventory CDC Debezium]
+        HoldExpiry[Hold TTL Sweeper]
+        Indexer[Search Indexer]
+        PriceJob[Dynamic Price Updater]
+        EmailQ[Confirmation Email Queue]
+    end
+    subgraph Storage
+        InventoryDB[(Inventory DB PostgreSQL)]
+        BookingDB[(Bookings DB)]
+        ES[(Elasticsearch Hotel Index)]
+        HoldsRedis[(Active Holds Redis TTL)]
+        HotelDB[(Hotel Catalog)]
+        ReviewDB[(Reviews DB)]
+        PriceDB[(Rate and Price History)]
+    end
+    subgraph Analytics
+        EventBus[Booking Events]
+        Lake[(Data Lake)]
+    end
+
+    Traveler -->|search dates| CDN --> LB --> APIGW
+    Mobile --> APIGW
+    APIGW --> Auth
+    APIGW --> RL
+
+    APIGW --> SearchSvc --> ES
+    SearchSvc --> PricingSvc --> PriceDB
+    APIGW --> AvailSvc --> InventoryDB
+
+    Traveler -->|book room| APIGW --> BookingSvc
+    BookingSvc -->|optimistic lock| InventoryDB
+    BookingSvc --> HoldSvc --> HoldsRedis
+    BookingSvc --> PaymentSvc
+    PaymentSvc --> ConfirmSvc --> BookingDB
+    ConfirmSvc --> InventoryDB
+    ConfirmSvc --> NotifySvc --> EmailQ
+
+    Traveler -->|cancel| APIGW --> CancelSvc --> BookingDB
+    CancelSvc --> PaymentSvc
+    CancelSvc --> InventoryDB
+
+    HotelMgr -->|add rooms or rates| APIGW --> InventoryMgr --> InventoryDB
+    HotelMgr --> HotelDB
+
+    Traveler -->|leave review| APIGW --> ReviewSvc --> ReviewDB
+
+    HoldsRedis --> HoldExpiry --> InventoryDB
+    InventoryDB --> CDCStream --> Indexer --> ES
+    PriceJob --> PriceDB
+
+    BookingSvc --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class InventoryDB,BookingDB,ES,HoldsRedis,HotelDB,ReviewDB,PriceDB storage
+    class CDCStream,HoldExpiry,Indexer,PriceJob,EmailQ async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Optimistic vs pessimistic locking for reservations', rationale: 'Optimistic locking is faster under low contention (most cases). Pessimistic locking is fairer and avoids starvation under high contention (flash sales). Use optimistic by default, pessimistic for flash sales.' },
     ],
@@ -1499,16 +2833,105 @@ export const systemDesignProblems = [
       { section: 'Dynamic Pricing', content: 'Fares are rule-based (fare class, advance purchase, day-of-week, seat class). Pricing engine evaluates fare rules at query time. Machine learning models predict demand and adjust base fares (yield management). Prices change every few minutes.' },
       { section: 'Ticketing', content: 'On successful payment, send ticketing request to airline (via GDS or NDC). Airline generates e-ticket (confirmed PNR). Send itinerary to user via email. Store booking details in our DB with airline PNR reference.' },
     ],
-    diagram: `graph LR
-    User -->|search| SearchSvc[Search Service]
-    SearchSvc --> GDS[GDS / Airline APIs]
-    SearchSvc --> Cache[(Fare Cache\nRedis)]
-    User -->|select flight| BookingSvc[Booking Service]
-    BookingSvc -->|create PNR hold| AirlinePSS[Airline PSS]
-    BookingSvc -->|payment| PaySvc[Payment Service]
-    PaySvc -->|confirm| BookingSvc
-    BookingSvc -->|ticket request| AirlinePSS
-    AirlinePSS -->|e-ticket| BookingSvc`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Traveler Web]
+        Mobile[Mobile App]
+        Agent[Travel Agent Tool]
+    end
+    subgraph Edge
+        CDN[CDN]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Booking API]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        SearchSvc[Multi-City Search]
+        FareSvc[Fare Quote Service]
+        PricingEngine[Fare Rule Pricing Engine]
+        YieldML[Yield Management ML]
+        BookingSvc[Booking Orchestrator]
+        PNRSvc[PNR Hold Service]
+        Ticketing[Ticketing Service]
+        PaySvc[Payment Service]
+        Itinerary[Itinerary Service]
+        CheckinSvc[Check-In Service]
+        RefundSvc[Refund and Rebook]
+        Notifier[Email and SMS Notifier]
+    end
+    subgraph Async
+        CacheRefresh[Fare Cache Refresher]
+        HoldExpiry[PNR Hold Expiry Sweeper]
+        PriceTrainer[Yield Model Trainer]
+        EmailQ[Email Queue]
+        FailRetry[Provider Retry Queue]
+    end
+    subgraph Services2 [External]
+        GDSAmadeus[GDS Amadeus]
+        GDSSabre[GDS Sabre]
+        AirlineNDC[Airline NDC API]
+        AirlinePSS[Airline PSS]
+    end
+    subgraph Storage
+        FareCache[(Fare Cache Redis 5min TTL)]
+        ItineraryDB[(Itinerary DB)]
+        BookingDB[(Booking DB)]
+        FareRulesDB[(Fare Rules DB)]
+        FlightES[(Flight Search Index)]
+        PriceHistory[(Pricing Model Store)]
+    end
+    subgraph Analytics
+        EventBus[Booking Events]
+        Lake[(Data Lake)]
+    end
+
+    Web -->|search| CDN --> LB --> APIGW
+    Mobile --> APIGW
+    Agent --> APIGW
+    APIGW --> Auth
+
+    APIGW --> SearchSvc --> FlightES
+    SearchSvc --> FareCache
+    FareCache -->|miss| FareSvc
+    FareSvc --> GDSAmadeus
+    FareSvc --> GDSSabre
+    FareSvc --> AirlineNDC
+    FareSvc --> PricingEngine --> FareRulesDB
+    PricingEngine --> YieldML --> PriceHistory
+    FareSvc --> FareCache
+
+    Web -->|select flight| APIGW --> BookingSvc
+    BookingSvc --> PNRSvc --> AirlinePSS
+    BookingSvc --> PaySvc
+    PaySvc --> Ticketing --> AirlinePSS
+    Ticketing --> ItineraryDB
+    Ticketing --> BookingDB
+    Ticketing --> Notifier --> EmailQ
+
+    Mobile -->|check in| APIGW --> CheckinSvc --> AirlinePSS
+
+    Web -->|cancel or rebook| APIGW --> RefundSvc --> PaySvc
+    RefundSvc --> AirlinePSS
+
+    APIGW --> Itinerary --> ItineraryDB
+
+    CacheRefresh --> FareCache
+    HoldExpiry --> AirlinePSS
+    PNRSvc -.->|fail| FailRetry --> PNRSvc
+    PriceTrainer --> PriceHistory
+
+    BookingSvc --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class FareCache,ItineraryDB,BookingDB,FareRulesDB,FlightES,PriceHistory storage
+    class CacheRefresh,HoldExpiry,PriceTrainer,EmailQ,FailRetry async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Cache fares vs real-time GDS query', rationale: 'Real-time GDS queries are expensive (latency + cost per call). Caching fares for 5 minutes dramatically reduces cost and improves search speed. Risk: user sees a cached price that has since changed; validate at booking time.' },
     ],
@@ -1534,14 +2957,87 @@ export const systemDesignProblems = [
       { section: 'Audit Trail', content: 'Every order event (submitted, modified, cancelled, filled) written to an immutable append-only ledger (Kafka + cold storage). Sequence numbers assigned by the matching engine. Used for regulatory reporting and post-trade analysis.' },
       { section: 'Risk Controls', content: 'Pre-trade risk checks before order reaches the matching engine: position limits, order size limits, price band checks (reject orders too far from market price). Prevents erroneous orders (fat-finger errors) that could crash the market.' },
     ],
-    diagram: `graph LR
-    Trader -->|order| Gateway[Order Gateway]
-    Gateway -->|risk check| RiskEngine[Risk Engine]
-    RiskEngine -->|approved| Matching[Matching Engine\nper symbol]
-    Matching -->|trade| AuditLog[(Audit Log\nKafka)]
-    Matching -->|market data| MDFeed[Market Data Feed]
-    MDFeed --> Subscribers[Traders / Algos]
-    Matching -->|fills| Portfolio[Portfolio Service]`,
+    diagram: `graph TB
+    subgraph Clients
+        RetailTrader[Retail Trader]
+        Algo[Algo Trader]
+        FIXClient[FIX Institutional Client]
+        Display[Price Display Subscriber]
+    end
+    subgraph Edge
+        ColocGW[Colo Order Gateway FPGA]
+        WSGW[WebSocket Market Data Gateway]
+    end
+    subgraph Gateway
+        APIGW[Order API]
+        Auth[Auth and Entitlements]
+    end
+    subgraph Services
+        RiskEngine[Pre Trade Risk Engine]
+        OrderRouter[Order Router]
+        MatchAAPL[Matching Engine AAPL]
+        MatchTSLA[Matching Engine TSLA]
+        MatchOther[Matching Engines Other Symbols]
+        OrderBook[In Memory Order Book]
+        Portfolio[Portfolio and Position Service]
+        ClearSvc[Clearing and Settlement]
+        Compliance[Compliance and Surveillance]
+        MarketDataSvc[Market Data Distribution]
+    end
+    subgraph Async
+        AuditStream[Audit Sequencer Kafka]
+        MDStream[Market Data Feed Kafka]
+        Reconcile[End of Day Reconcile]
+        ColdArchive[Cold Storage Archiver]
+        SurveillanceJob[Surveillance Replay]
+    end
+    subgraph Storage
+        AuditLog[(Append Only Audit Log)]
+        PortfolioDB[(Portfolio DB)]
+        SettleDB[(Settlement DB)]
+        RefData[(Symbol Reference Data)]
+        UserDB[(User Accounts)]
+        ColdS3[(Cold Archive S3)]
+    end
+    subgraph Analytics
+        TickStore[(Tick Data Warehouse)]
+        Dash[Trading Dashboards]
+    end
+
+    RetailTrader -->|order| APIGW --> Auth
+    Algo -->|order| ColocGW
+    FIXClient -->|FIX 4.4| ColocGW
+    APIGW --> OrderRouter
+    ColocGW --> OrderRouter
+    OrderRouter --> RiskEngine --> UserDB
+    RiskEngine --> RefData
+
+    RiskEngine -->|approved AAPL| MatchAAPL --> OrderBook
+    RiskEngine -->|approved TSLA| MatchTSLA --> OrderBook
+    RiskEngine -->|approved other| MatchOther --> OrderBook
+
+    MatchAAPL --> AuditStream --> AuditLog
+    MatchTSLA --> AuditStream
+    MatchAAPL --> MDStream --> MarketDataSvc --> WSGW --> Display
+    MarketDataSvc --> Algo
+
+    MatchAAPL -->|fills| Portfolio --> PortfolioDB
+    Portfolio --> ClearSvc --> SettleDB
+
+    AuditLog --> Compliance --> SurveillanceJob
+    AuditLog --> ColdArchive --> ColdS3
+    SettleDB --> Reconcile
+
+    MDStream --> TickStore --> Dash
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class AuditLog,PortfolioDB,SettleDB,RefData,UserDB,ColdS3 storage
+    class AuditStream,MDStream,Reconcile,ColdArchive,SurveillanceJob async
+    class ColocGW,WSGW edge
+    class TickStore,Dash analytics`,
     tradeoffs: [
       { decision: 'Single-threaded matching engine vs multi-threaded', rationale: 'Single-threaded eliminates lock contention and ensures strict order determinism. Vertical scaling (fast CPUs) handles typical throughput. Multi-threaded would require complex coordination and risk non-determinism.' },
     ],
@@ -1567,14 +3063,87 @@ export const systemDesignProblems = [
       { section: 'Friend Leaderboard', content: 'Store friends as a Redis Set per player. To compute friend leaderboard: ZUNIONSTORE temp_key 1 leaderboard WEIGHTS 1 AGGREGATE MAX using player IDs filtered by friend list. Or: fetch all friend scores with ZSCORE and rank client-side (feasible for friend lists < 1000).' },
       { section: 'Persistence & Sharding', content: 'Redis RDB snapshots + AOF for persistence. For >1B players: shard by game_id or player_id range across multiple Redis instances. Consistent hashing for shard routing. Each shard holds a subset of the global leaderboard — cross-shard merge needed for global top-N.' },
     ],
-    diagram: `graph LR
-    GameServer -->|ZADD score| Redis[(Redis\nSorted Set)]
-    Client -->|GET top 10| LeaderboardAPI[Leaderboard API]
-    LeaderboardAPI -->|ZREVRANGE 0 9| Redis
-    Redis -->|top 10 with scores| LeaderboardAPI
-    LeaderboardAPI --> Client
-    Client -->|GET my rank| LeaderboardAPI
-    LeaderboardAPI -->|ZREVRANK player| Redis`,
+    diagram: `graph TB
+    subgraph Clients
+        Player[Player Client]
+        Spectator[Spectator UI]
+        GameServer[Game Server]
+        Esports[Esports Broadcast]
+    end
+    subgraph Edge
+        CDN[Edge Cache Top N]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Leaderboard API]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        ScoreSvc[Score Update Service]
+        TopNSvc[Top N Query Service]
+        RankSvc[Player Rank Service]
+        NeighborhoodSvc[Neighborhood Query]
+        FriendSvc[Friend Leaderboard]
+        SeasonSvc[Season and Reset Service]
+        AntiCheat[Anti Cheat Validator]
+        ShardRouter[Shard Router Consistent Hash]
+    end
+    subgraph Async
+        AOF[AOF Persistence]
+        SnapshotJob[RDB Snapshot Job]
+        SeasonRollover[Season Rollover Job]
+        MergeTopN[Cross Shard Top N Merger]
+    end
+    subgraph Storage
+        RedisShard1[(Redis ZSET Shard 1)]
+        RedisShard2[(Redis ZSET Shard 2)]
+        RedisShardN[(Redis ZSET Shard N)]
+        FriendDB[(Friends Graph DB)]
+        SeasonArchive[(Past Seasons Archive)]
+        PlayerDB[(Player Profile DB)]
+    end
+    subgraph Analytics
+        EventBus[Game Events Bus]
+        Lake[(Data Lake)]
+    end
+
+    GameServer -->|ZINCRBY score| APIGW --> Auth
+    APIGW --> AntiCheat
+    AntiCheat --> ScoreSvc --> ShardRouter
+    ShardRouter --> RedisShard1
+    ShardRouter --> RedisShard2
+    ShardRouter --> RedisShardN
+
+    Player -->|GET top 10| CDN --> TopNSvc
+    TopNSvc --> MergeTopN
+    MergeTopN --> RedisShard1
+    MergeTopN --> RedisShard2
+    MergeTopN --> RedisShardN
+
+    Player -->|GET my rank| APIGW --> RankSvc --> ShardRouter
+    Player -->|GET neighborhood| APIGW --> NeighborhoodSvc --> ShardRouter
+    Player -->|GET friend board| APIGW --> FriendSvc --> FriendDB
+    FriendSvc --> RedisShard1
+
+    Spectator --> CDN
+    Esports --> APIGW
+
+    APIGW --> SeasonSvc --> SeasonRollover --> SeasonArchive
+    APIGW --> PlayerDB
+
+    RedisShard1 --> AOF
+    RedisShard1 --> SnapshotJob
+
+    ScoreSvc --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class RedisShard1,RedisShard2,RedisShardN,FriendDB,SeasonArchive,PlayerDB storage
+    class AOF,SnapshotJob,SeasonRollover,MergeTopN async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Redis sorted set vs DB ORDER BY rank', rationale: 'Redis ZREVRANK is O(log N) — microseconds for 100M players. SQL ORDER BY with RANK() requires a full scan or expensive index. Redis is the clear winner for real-time leaderboards.' },
     ],
@@ -1600,16 +3169,92 @@ export const systemDesignProblems = [
       { section: 'Request Routing & Queuing', content: 'API Gateway authenticates API keys, checks rate limits (token bucket in Redis), and routes to the correct model cluster. A scheduler queue (Redis or Kafka) holds pending requests. The inference scheduler pulls from the queue and bins-packs requests by sequence length to minimise padding waste. Streaming responses are sent back via SSE (Server-Sent Events) or WebSocket.' },
       { section: 'Observability & Cost', content: 'Token counters per API key feed the billing system (token-in × price_in + token-out × price_out). GPU utilisation, queue depth, and time-to-first-token are key SLIs. Auto-scaling triggers on queue depth: if queue grows > 100 requests, spin up another inference pod. Use spot/preemptible GPUs for non-latency-sensitive batch workloads.' },
     ],
-    diagram: `graph TD
-    Client -->|POST /v1/chat| APIGW[API Gateway\nAuth + Rate Limit]
-    APIGW --> Queue[Request Queue\nRedis / Kafka]
-    Queue --> Scheduler[Inference Scheduler\nContinuous Batching]
-    Scheduler --> GPU1[GPU Cluster\nModel Shard 1]
-    Scheduler --> GPU2[GPU Cluster\nModel Shard 2]
-    GPU1 -->|tokens| Stream[SSE Stream]
-    GPU2 -->|tokens| Stream
-    Stream --> Client
-    APIGW --> Meter[Usage Metering\nBilling DB]`,
+    diagram: `graph TB
+    subgraph Clients
+        DevA[Developer App]
+        ChatUI[Chat UI]
+        Batch[Batch Inference Job]
+    end
+    subgraph Edge
+        LB[Global Load Balancer]
+        SSE[SSE and WebSocket Streaming]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[API Key Auth]
+        TokenBucket[Token Bucket Rate Limit Redis]
+        ModelRouter[Model Cluster Router]
+    end
+    subgraph Services
+        Scheduler[Inference Scheduler]
+        ContBatch[Continuous Batcher]
+        PrefillEng[Prefill Engine]
+        DecodeEng[Decode Engine]
+        TPCluster7B[Tensor Parallel Cluster 7B]
+        TPCluster70B[Tensor Parallel Cluster 70B]
+        PPCluster405B[Pipeline Parallel 405B]
+        PagedAttn[Paged Attention Manager]
+        CancelSvc[Cancellation Service]
+    end
+    subgraph Async
+        Queue[Request Queue Redis or Kafka]
+        Meter[Usage Metering Aggregator]
+        Autoscaler[GPU Pod Autoscaler]
+        SpotBatch[Spot GPU Batch Pool]
+        WarmUp[Model Warmup Loader]
+    end
+    subgraph Storage
+        KVCache[(KV Cache GPU HBM)]
+        CPUSwap[(CPU RAM KV Swap)]
+        ModelWeights[(Model Weights NFS or S3)]
+        BillingDB[(Billing and Usage DB)]
+        RateLimitRedis[(Rate Limit Redis)]
+    end
+    subgraph Analytics
+        EventBus[Inference Telemetry Bus]
+        Metrics[(Prom Metrics Store)]
+        Dash[Grafana Dashboards]
+    end
+
+    DevA -->|POST chat| LB --> APIGW
+    ChatUI --> LB
+    Batch --> LB
+    APIGW --> Auth
+    APIGW --> TokenBucket --> RateLimitRedis
+    APIGW --> ModelRouter
+    ModelRouter --> Queue --> Scheduler
+
+    Scheduler --> ContBatch
+    ContBatch --> PrefillEng
+    ContBatch --> DecodeEng
+    ContBatch --> PagedAttn --> KVCache
+    PagedAttn -.->|swap LRU| CPUSwap
+
+    Scheduler -->|7B request| TPCluster7B --> ModelWeights
+    Scheduler -->|70B request| TPCluster70B --> ModelWeights
+    Scheduler -->|405B request| PPCluster405B --> ModelWeights
+
+    TPCluster7B -->|stream tokens| SSE --> DevA
+    TPCluster70B --> SSE --> ChatUI
+    PPCluster405B --> SSE
+
+    DevA -.->|cancel| CancelSvc --> Scheduler
+
+    APIGW -->|tokens in and out| Meter --> BillingDB
+    Queue --> Autoscaler --> TPCluster7B
+    SpotBatch --> Batch
+    WarmUp --> ModelWeights
+
+    Scheduler --> EventBus --> Metrics --> Dash
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class KVCache,CPUSwap,ModelWeights,BillingDB,RateLimitRedis storage
+    class Queue,Meter,Autoscaler,SpotBatch,WarmUp async
+    class LB,SSE edge
+    class EventBus,Metrics,Dash analytics`,
     tradeoffs: [
       { decision: 'Continuous batching vs static batching', rationale: 'Static batching is simpler but GPU sits idle waiting for the slowest sequence. Continuous batching is complex to implement but is required to hit >70% GPU utilisation in production.' },
       { decision: 'Tensor parallelism vs pipeline parallelism', rationale: 'Tensor parallelism has lower latency (no pipeline bubbles) but higher per-layer communication cost. Pipeline parallelism reduces communication but adds latency. Tensor parallel is preferred within a single NVLink-connected node.' },
@@ -1636,18 +3281,92 @@ export const systemDesignProblems = [
       { section: 'Re-ranking', content: 'ANN retrieval optimises for embedding similarity, which is a proxy for relevance. A cross-encoder re-ranker (e.g. Cohere Rerank, a fine-tuned BERT) takes the query + each candidate chunk and scores them jointly — much more accurate than bi-encoder similarity but too slow to run on all documents. Run re-ranker on the top-50 ANN results, return top-5. Adds ~100ms but significantly improves answer quality.' },
       { section: 'LLM Context Assembly & Prompting', content: 'Assemble a prompt: system instructions + top-5 retrieved passages (each labelled [Source 1], [Source 2]…) + user question. Ask the LLM to answer using only the provided sources and cite them. If no source is relevant, instruct the model to say so rather than hallucinate. Stream the response. Post-process to extract citation markers and map them to doc metadata for the UI.' },
     ],
-    diagram: `graph TD
-    Docs[Documents\nPDF/HTML/MD] -->|async| Queue[Ingestion Queue\nKafka]
-    Queue --> Parser[Parse & Chunk]
-    Parser --> Embed[Embedding Service]
-    Embed --> VectorDB[(Vector DB\nHNSW Index)]
-    Parser --> DocStore[(Document Store\nS3 + Metadata DB)]
-    User -->|question| API[Query API]
-    API --> Embed2[Embed Question]
-    Embed2 -->|ANN search| VectorDB
-    VectorDB -->|top 50 chunks| Reranker[Cross-Encoder\nRe-ranker]
-    Reranker -->|top 5 chunks| LLM[LLM Service]
-    LLM -->|answer + citations| User`,
+    diagram: `graph TB
+    subgraph Clients
+        WikiSync[Wiki Sync Connector]
+        SlackSync[Slack Connector]
+        PDFUpload[PDF Upload]
+        AskUser[Asking User]
+        AdminUI[Admin Console]
+    end
+    subgraph Edge
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        QueryAPI[Query API]
+        IngestAPI[Ingest API]
+        Auth[Auth and ACL Resolver]
+    end
+    subgraph Services
+        Parser[Document Parser Tika and BS4]
+        Chunker[Semantic Chunker]
+        EmbedSvc[Embedding Service Bi Encoder]
+        QEmbed[Question Embedder]
+        Retriever[ANN Retriever]
+        MetaFilter[Metadata ACL Filter]
+        Reranker[Cross Encoder Reranker]
+        ContextBuilder[Context and Citation Builder]
+        LLMSvc[LLM Service]
+        AnswerCache[Answer Cache]
+        FeedbackSvc[User Feedback Service]
+    end
+    subgraph Async
+        Kafka[Ingestion Queue Kafka]
+        EmbedWorker[Embedding Worker Pool]
+        ReindexJob[Reindex on Update Job]
+        EvalJob[Eval and Recall Monitor]
+        DeleteJob[Tombstone Cleanup]
+    end
+    subgraph Storage
+        VectorDB[(Vector DB HNSW)]
+        DocStore[(Doc Store S3)]
+        MetaDB[(Chunk Metadata DB)]
+        ACLStore[(ACL Tags Store)]
+        AnswerKV[(Answer Cache Redis)]
+        FeedbackDB[(Feedback DB)]
+    end
+    subgraph Analytics
+        EventBus[Query Telemetry]
+        Lake[(Data Lake)]
+    end
+
+    WikiSync --> IngestAPI
+    SlackSync --> IngestAPI
+    PDFUpload --> IngestAPI
+    AdminUI --> IngestAPI
+    IngestAPI --> Auth
+    IngestAPI --> Kafka --> Parser --> Chunker --> EmbedWorker --> EmbedSvc
+    EmbedSvc --> VectorDB
+    Parser --> DocStore
+    Chunker --> MetaDB
+    IngestAPI --> ACLStore
+
+    AskUser -->|question| LB --> QueryAPI --> Auth
+    QueryAPI --> AnswerCache --> AnswerKV
+    AnswerCache -->|miss| QEmbed --> EmbedSvc
+    QEmbed --> Retriever --> VectorDB
+    Retriever --> MetaFilter --> ACLStore
+    Retriever -->|top 50| Reranker
+    Reranker -->|top 5| ContextBuilder --> DocStore
+    ContextBuilder --> LLMSvc
+    LLMSvc -->|answer plus citations| QueryAPI
+    QueryAPI --> AskUser
+
+    AskUser -->|thumbs up or down| FeedbackSvc --> FeedbackDB
+    FeedbackDB --> EvalJob
+    ReindexJob --> Kafka
+    DeleteJob --> VectorDB
+
+    QueryAPI --> EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class VectorDB,DocStore,MetaDB,ACLStore,AnswerKV,FeedbackDB storage
+    class Kafka,EmbedWorker,ReindexJob,EvalJob,DeleteJob async
+    class LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Bi-encoder ANN vs cross-encoder for retrieval', rationale: 'Bi-encoder (ANN) is O(1) against a pre-built index — milliseconds for millions of vectors. Cross-encoder is O(N) — only feasible on the small candidate set. Two-stage pipeline gives the best of both.' },
       { decision: 'Chunk size', rationale: 'Smaller chunks (128 tokens) improve precision (less irrelevant text per chunk) but may lose context. Larger chunks (1024 tokens) improve recall but dilute the relevance signal. The parent document retriever pattern decouples the two concerns.' },
@@ -1674,15 +3393,79 @@ export const systemDesignProblems = [
       { section: 'Streaming Materialisation', content: 'For features that must be fresh within minutes (e.g. "user click count in last 10 minutes"), a streaming pipeline (Flink or Spark Streaming) consumes the source Kafka topic, applies the transformation (windowed aggregation), and writes results to the online store in real time. Streaming features co-exist with batch features under the same entity key in Redis.' },
       { section: 'Serving SDK & Consistency', content: 'Model inference code calls feature_store.get_online_features(entity_ids, feature_names). The SDK batches multiple entity lookups into a single Redis pipeline call. A common footgun: training used offline features; inference uses online features — if the two materialisation pipelines apply transformations differently, training-serving skew silently degrades model performance. The fix: share transformation logic in a single feature transformation library used by both pipelines.' },
     ],
-    diagram: `graph TD
-    DW[Data Warehouse\nSnowflake/BigQuery] -->|batch job Spark| OfflineStore[(Offline Store\nS3 Parquet)]
-    Kafka[Kafka Events] -->|Flink streaming| OnlineStore[(Online Store\nRedis)]
-    DW -->|batch sync| OnlineStore
-    OfflineStore -->|point-in-time join| Training[Training Dataset]
-    Training --> ModelTraining[Model Training]
-    InferenceService[Inference Service] -->|get_online_features| OnlineStore
-    Registry[Feature Registry] -->|defines| OfflineStore
-    Registry -->|defines| OnlineStore`,
+    diagram: `graph TB
+    subgraph Clients
+        DataSci[Data Scientist]
+        TrainingPipeline[Model Training Pipeline]
+        InferenceSvc[Online Inference Service]
+        DataCatalog[Data Catalog UI]
+    end
+    subgraph Gateway
+        SDK[Feature Store SDK]
+        RegistryAPI[Feature Registry API]
+    end
+    subgraph Services
+        Registry[Feature Registry]
+        TransformLib[Shared Transformation Library]
+        OfflineSvc[Offline Materialization Svc]
+        OnlineSvc[Online Read Service]
+        StreamSvc[Streaming Materialization Svc]
+        PITJoiner[Point in Time Join Engine]
+        Lineage[Feature Lineage Tracker]
+        ServeBatcher[HGETALL Pipeline Batcher]
+    end
+    subgraph Async
+        SparkBatch[Spark Batch Job]
+        FlinkStream[Flink Streaming Job]
+        Backfill[Backfill Job]
+        FreshnessMon[Feature Freshness Monitor]
+        SkewDetector[Training Serving Skew Detector]
+    end
+    subgraph Storage
+        DW[(Data Warehouse Snowflake)]
+        OfflineStore[(Offline Store S3 Parquet)]
+        OnlineStore[(Online Store Redis)]
+        MetaDB[(Registry Metadata DB)]
+        LineageDB[(Lineage DB)]
+    end
+    subgraph Analytics
+        Kafka[Kafka Event Streams]
+        EventBus[Feature Telemetry]
+        Dash[Monitoring Dashboards]
+    end
+
+    DataSci -->|declare feature group| SDK --> RegistryAPI --> Registry --> MetaDB
+    Registry --> Lineage --> LineageDB
+
+    DW --> SparkBatch --> OfflineStore
+    SparkBatch --> TransformLib
+    SparkBatch --> OnlineStore
+    Kafka --> FlinkStream --> OnlineStore
+    FlinkStream --> TransformLib
+
+    TrainingPipeline -->|get historical features| SDK --> PITJoiner --> OfflineStore
+    PITJoiner --> TrainingPipeline
+
+    InferenceSvc -->|get online features| SDK --> ServeBatcher --> OnlineSvc --> OnlineStore
+
+    DataCatalog --> Registry
+    DataCatalog --> Lineage
+
+    Backfill --> OfflineStore
+    Backfill --> OnlineStore
+    FreshnessMon --> OnlineStore
+    SkewDetector --> OfflineStore
+    SkewDetector --> OnlineStore
+
+    OnlineSvc --> EventBus --> Dash
+    FreshnessMon --> EventBus
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class DW,OfflineStore,OnlineStore,MetaDB,LineageDB storage
+    class SparkBatch,FlinkStream,Backfill,FreshnessMon,SkewDetector async
+    class Kafka,EventBus,Dash analytics`,
     tradeoffs: [
       { decision: 'Separate online vs offline stores vs unified', rationale: 'A single store (e.g. DynamoDB for both) simplifies consistency but cannot simultaneously serve petabyte-scale historical scans and sub-10ms point reads. Separate stores optimised for their access patterns are the industry standard (Feast, Tecton, Hopsworks all use this split).' },
       { decision: 'Push vs pull materialisation to online store', rationale: 'Push (pipeline writes to Redis on each update) gives low latency but complexity. Pull (inference service reads from the warehouse on demand) is simpler but too slow for < 10ms SLA. Push materialisation is required for online serving.' },
@@ -1709,16 +3492,89 @@ export const systemDesignProblems = [
       { section: 'Model Registry', content: 'After a training run, the data scientist registers the best checkpoint to the model registry: a versioned catalogue of trained models. Each version records: training run ID (lineage back to code + data + hyperparameters), evaluation metrics, and a lifecycle stage (None → Staging → Production → Archived). The inference platform reads model URIs from the registry to deploy — decoupling training from serving and enabling safe rollbacks.' },
       { section: 'Fault Tolerance & Checkpointing', content: 'Long training runs (days on 512 GPUs) are expensive to restart from scratch. The platform periodically saves checkpoints to S3 (every N steps). On node failure, the job is automatically restarted from the latest checkpoint. Spot/preemptible instance interruptions are handled via a "checkpoint on SIGTERM" signal handler injected by the platform. Elastic training (PyTorch Elastic) allows a job to continue with fewer nodes after a failure rather than full restart.' },
     ],
-    diagram: `graph TD
-    DS[Data Scientist] -->|submit job| CLI[CLI / SDK]
-    CLI --> JobAPI[Job API]
-    JobAPI --> Scheduler[Gang Scheduler\nKubernetes + Volcano]
-    Scheduler --> GPUNodes[GPU Node Pool\nA100 / H100]
-    GPUNodes -->|metrics, params| Tracker[Experiment Tracker\nMLflow]
-    GPUNodes -->|checkpoints| S3[(S3 Artefact Store)]
-    GPUNodes -->|model| Registry[Model Registry]
-    Registry -->|deploy URI| InferencePlatform[Inference Platform]
-    Tracker --> DB[(PostgreSQL\nRun Metadata)]`,
+    diagram: `graph TB
+    subgraph Clients
+        DataSci[Data Scientist]
+        CLI[CLI and SDK]
+        Notebook[Jupyter Notebook]
+        InferencePlatform[Inference Platform]
+    end
+    subgraph Gateway
+        JobAPI[Job Submit API]
+        Auth[Auth and Quota Service]
+        UI[Web UI]
+    end
+    subgraph Services
+        Scheduler[Gang Scheduler Volcano]
+        K8sCtl[Kubernetes Control Plane]
+        ResourceMgr[Resource and Quota Mgr]
+        DDPLauncher[DDP and FSDP Launcher]
+        NCCLBootstrap[NCCL Bootstrap]
+        Tracker[Experiment Tracker MLflow]
+        Registry[Model Registry]
+        ElasticCtl[PyTorch Elastic Controller]
+        DatasetSvc[Dataset Versioning Service]
+        Promotion[Stage Promotion Service]
+    end
+    subgraph Async
+        CheckpointJob[Periodic Checkpoint Saver]
+        SpotInterrupt[Spot Preempt Handler]
+        ArtifactGC[Old Artifact GC]
+        MetricsAgg[Metrics Aggregator]
+        BillingAgg[GPU Hours Billing]
+    end
+    subgraph Storage
+        GPUPoolA100[GPU Pool A100]
+        GPUPoolH100[GPU Pool H100]
+        CPUPool[CPU Pool]
+        ArtifactS3[(S3 Artifact Store)]
+        CheckpointS3[(Checkpoint S3)]
+        RunDB[(Run Metadata PostgreSQL)]
+        ModelRegistryDB[(Model Registry DB)]
+        DatasetCatalog[(Dataset Catalog)]
+    end
+    subgraph Analytics
+        EventBus[Job Telemetry Bus]
+        Dash[Grafana Dashboards]
+    end
+
+    DataSci --> CLI --> JobAPI --> Auth
+    Notebook --> JobAPI
+    UI --> JobAPI
+
+    JobAPI --> ResourceMgr
+    JobAPI --> Scheduler --> K8sCtl
+    Scheduler --> GPUPoolA100
+    Scheduler --> GPUPoolH100
+    Scheduler --> CPUPool
+
+    K8sCtl --> DDPLauncher
+    DDPLauncher --> NCCLBootstrap --> GPUPoolA100
+    DDPLauncher --> ElasticCtl
+
+    GPUPoolA100 -->|metrics and params| Tracker --> RunDB
+    GPUPoolA100 -->|checkpoints| CheckpointJob --> CheckpointS3
+    GPUPoolA100 -->|artifacts| ArtifactS3
+
+    GPUPoolA100 --> DatasetSvc --> DatasetCatalog
+
+    Tracker --> Registry --> ModelRegistryDB
+    Registry --> Promotion --> InferencePlatform
+
+    SpotInterrupt --> GPUPoolA100
+    SpotInterrupt --> CheckpointJob
+    ArtifactGC --> ArtifactS3
+    MetricsAgg --> Tracker
+
+    GPUPoolA100 --> BillingAgg
+    BillingAgg --> EventBus --> Dash
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class ArtifactS3,CheckpointS3,RunDB,ModelRegistryDB,DatasetCatalog storage
+    class CheckpointJob,SpotInterrupt,ArtifactGC,MetricsAgg,BillingAgg async
+    class EventBus,Dash analytics`,
     tradeoffs: [
       { decision: 'Gang scheduling vs best-effort scheduling', rationale: 'Best-effort partial allocation causes distributed jobs to hang waiting for remaining nodes — wasting the allocated GPUs. Gang scheduling guarantees all-or-nothing allocation, eliminating deadlock at the cost of some scheduler complexity and potential head-of-line blocking by large jobs.' },
       { decision: 'DDP vs FSDP', rationale: 'DDP is simpler and has lower communication overhead (only gradients are communicated), but requires the full model to fit in each GPU\'s memory. FSDP shards everything, enabling training of models 4–8× larger, at the cost of higher communication volume and implementation complexity.' },
@@ -1745,18 +3601,105 @@ export const systemDesignProblems = [
       { section: 'Distributed Architecture', content: 'Shard vectors across nodes by ID range or consistent hashing. Each shard holds a full HNSW index for its vectors. At query time, the query is broadcast to all shards (scatter); each shard returns its local top-K; the coordinator merges and re-ranks the global top-K (gather). Replication factor of 3 for read availability and fault tolerance. Writes go to a primary shard; the primary updates its HNSW index and replicates asynchronously to replicas.' },
       { section: 'Real-time Upserts', content: 'HNSW does not support efficient incremental deletes — deleting from the graph requires re-linking neighbours. Solution: mark deleted vectors with a tombstone (skip during traversal). Periodically compact the index offline to physically remove tombstones. New vectors are inserted into the graph immediately (HNSW supports online inserts in O(log N)). To handle the delay between upsert and index refresh on replicas, the client SDK can fall back to a brute-force scan of a small "dirty buffer" of recent upserts not yet in the main index.' },
     ],
-    diagram: `graph TD
-    Client -->|upsert / query| LB[Load Balancer]
-    LB --> Coordinator[Query Coordinator]
-    Coordinator -->|scatter query| Shard1[Shard 1\nHNSW Index]
-    Coordinator -->|scatter query| Shard2[Shard 2\nHNSW Index]
-    Coordinator -->|scatter query| Shard3[Shard 3\nHNSW Index]
-    Shard1 -->|local top-K| Coordinator
-    Shard2 -->|local top-K| Coordinator
-    Shard3 -->|local top-K| Coordinator
-    Coordinator -->|global top-K| Client
-    Shard1 --- Replica1[(Replica 1)]
-    Shard2 --- Replica2[(Replica 2)]`,
+    diagram: `graph TB
+    subgraph Clients
+        RAGApp[RAG Application]
+        ImageSearch[Image Similarity App]
+        RecSys[Recommendation System]
+        AdminUI[Admin UI]
+    end
+    subgraph Edge
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[Vector DB API]
+        Auth[Auth and Namespace ACL]
+    end
+    subgraph Services
+        Coordinator[Query Coordinator]
+        UpsertSvc[Upsert Service]
+        DeleteSvc[Delete Service]
+        FilterPlanner[Filter Selectivity Planner]
+        Scatter[Scatter Query Fan Out]
+        Gather[Top K Merge and Rerank]
+        Shard1[Shard 1 HNSW]
+        Shard2[Shard 2 HNSW]
+        ShardN[Shard N HNSW]
+        Replica1[Shard 1 Replica]
+        Replica2[Shard 2 Replica]
+        ReRanker[Original Vector Reranker]
+        Quantizer[PQ and Scalar Quantizer]
+    end
+    subgraph Async
+        BuilderJob[HNSW Index Builder]
+        CompactJob[Tombstone Compaction]
+        TrainingJob[PQ Codebook Trainer]
+        ReplLag[Replica Sync]
+        DirtyBufferGC[Dirty Buffer Flush]
+    end
+    subgraph Storage
+        VectorsRaw[(Raw float32 Vectors)]
+        QuantVectors[(Quantized int8 Vectors)]
+        HNSWGraph[(HNSW Graph Edges)]
+        MetaIdx[(Metadata Inverted Index)]
+        Tombstones[(Tombstone Log)]
+        DirtyBuffer[(Dirty Upsert Buffer)]
+        NamespaceMeta[(Namespace Registry)]
+    end
+    subgraph Analytics
+        EventBus[Query Telemetry]
+        Metrics[Recall and Latency Dashboards]
+    end
+
+    RAGApp -->|query top K| LB --> APIGW --> Auth
+    ImageSearch --> APIGW
+    RecSys --> APIGW
+    AdminUI --> APIGW
+
+    APIGW --> Coordinator
+    Coordinator --> FilterPlanner --> MetaIdx
+    FilterPlanner -->|low selectivity post filter| Scatter
+    FilterPlanner -->|high selectivity pre filter| Scatter
+    Scatter --> Shard1
+    Scatter --> Shard2
+    Scatter --> ShardN
+    Shard1 --> HNSWGraph
+    Shard1 --> QuantVectors
+    Shard1 --> DirtyBuffer
+    Shard1 -->|local top K| Gather
+    Shard2 -->|local top K| Gather
+    ShardN -->|local top K| Gather
+    Gather --> ReRanker --> VectorsRaw
+    ReRanker -->|global top K| APIGW --> RAGApp
+
+    APIGW -->|upsert| UpsertSvc --> Shard1
+    UpsertSvc --> VectorsRaw
+    UpsertSvc --> Quantizer --> QuantVectors
+    UpsertSvc --> DirtyBuffer
+
+    APIGW -->|delete by id| DeleteSvc --> Tombstones
+
+    Shard1 --> Replica1
+    Shard2 --> Replica2
+    ReplLag --> Replica1
+
+    BuilderJob --> HNSWGraph
+    CompactJob --> Tombstones
+    CompactJob --> HNSWGraph
+    TrainingJob --> Quantizer
+    DirtyBufferGC --> DirtyBuffer
+
+    APIGW --> NamespaceMeta
+    Coordinator --> EventBus --> Metrics
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class VectorsRaw,QuantVectors,HNSWGraph,MetaIdx,Tombstones,DirtyBuffer,NamespaceMeta storage
+    class BuilderJob,CompactJob,TrainingJob,ReplLag,DirtyBufferGC async
+    class LB edge
+    class EventBus,Metrics analytics`,
     tradeoffs: [
       { decision: 'HNSW vs IVF (Inverted File Index)', rationale: 'HNSW gives higher recall at low latency with no training step, but uses more memory (graph edges). IVF clusters vectors into centroids (requires k-means training), then searches only nearby clusters — lower memory, easier to shard, but slightly lower recall and requires retraining when the distribution shifts. HNSW dominates for online serving; IVF+PQ is preferred for billion-scale offline batch search.' },
       { decision: 'Pre-filtering vs post-filtering for metadata', rationale: 'Post-filtering is simple but fails on selective filters (returns too few results). Pre-filtering with a filtered HNSW traversal is accurate but requires the metadata index to be co-located with the vector index, increasing implementation complexity. Most production systems use a selectivity-based routing heuristic.' },
