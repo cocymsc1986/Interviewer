@@ -19,22 +19,26 @@ export const systemDesignProblems = [
       { section: 'Caching', content: 'Redis cache with LRU eviction sits in front of the DB for reads. Cache key = short_code, value = long_url. Cache hit ratio >80% given Zipf distribution of access.' },
       { section: 'Redirect Strategy', content: '301 (permanent) allows CDN and browser caching but loses click analytics. 302 (temporary) hits the origin every time but enables analytics. Use 302 for analytics; 301 for pure perf.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web App]
         Mobile[Mobile App]
         Bot[Bot or API Caller]
     end
     subgraph Edge
+        direction TB
         CDN[CDN Edge Cache]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth Service]
         RL[Rate Limiter]
     end
     subgraph Services
+        direction TB
         Shorten[Shorten Service]
         Redirect[Redirect Service]
         Custom[Custom Alias Service]
@@ -43,11 +47,13 @@ export const systemDesignProblems = [
         UserSvc[User Account Svc]
     end
     subgraph Async
+        direction TB
         ClickQ[Click Event Queue]
         ClickW[Click Aggregator]
         ExpireJob[TTL Sweeper Job]
     end
     subgraph Storage
+        direction TB
         IDGen[(ID Generator Base62)]
         URLDB[(URL Store PostgreSQL)]
         Cache[(Redis Hot URLs)]
@@ -55,6 +61,7 @@ export const systemDesignProblems = [
         ClickDB[(Click Counts DB)]
     end
     subgraph Analytics2 [Analytics]
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
     end
@@ -83,6 +90,8 @@ export const systemDesignProblems = [
     ExpireJob --> URLDB
     ExpireJob --> Cache
     EventBus --> Lake
+
+    Web ~~~ CDN ~~~ APIGW ~~~ Shorten ~~~ ClickQ ~~~ IDGen
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -119,17 +128,20 @@ export const systemDesignProblems = [
       { section: 'Media Handling', content: 'Images/videos go to blob storage (S3). URLs stored with tweet. CDN serves media. Thumbnail generation is async via a queue.' },
       { section: 'Observability', content: 'Key metrics: tweet write latency P99, timeline read latency P99, fan-out queue depth (alert if >1M backlog), cache hit ratio (alert if <70%). Distributed tracing (Jaeger/Zipkin) on the tweet-write and feed-read paths. Dashboard: tweets/sec, active WebSocket connections, Redis memory utilization.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web App]
         Mobile[Mobile App]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth Service]
         RL[Rate Limiter]
     end
     subgraph Services
+        direction TB
         Tweet[Tweet Service]
         Timeline[Timeline Service]
         UserSvc[User Profile Svc]
@@ -141,6 +153,7 @@ export const systemDesignProblems = [
         MediaSvc[Media Service]
     end
     subgraph Async
+        direction TB
         FanoutQ[Fan-out Queue]
         FanoutW[Fan-out Workers]
         MediaProc[Media Processor]
@@ -148,6 +161,7 @@ export const systemDesignProblems = [
         TrendsJob[Trends Aggregator]
     end
     subgraph Storage
+        direction TB
         TweetDB[(Tweets Cassandra)]
         TLCache[(Timeline Cache Redis)]
         GraphDB[(Follow Graph DB)]
@@ -157,6 +171,7 @@ export const systemDesignProblems = [
         MediaS3[(Media S3 and CDN)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
     end
@@ -195,6 +210,8 @@ export const systemDesignProblems = [
 
     APIGW --> UserSvc --> UserDB
 
+    Web ~~~ APIGW ~~~ Tweet ~~~ FanoutQ ~~~ TweetDB ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
@@ -226,19 +243,23 @@ export const systemDesignProblems = [
       { section: 'Social Graph', content: 'Store follower/following relationships in a dedicated graph store or a separate relational table follows(follower_id, followee_id). Indexed on both columns.' },
       { section: 'Post Metadata', content: 'Store in Cassandra: post_id, user_id, s3_url, caption, created_at, like_count, comment_count. Like counts use Redis counters flushed to DB periodically.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web App]
         Mobile[Mobile App]
     end
     subgraph Edge
+        direction TB
         CDN[CloudFront CDN]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         UploadSvc[Upload Service]
         FeedSvc[Feed Service]
         PostSvc[Post Metadata Svc]
@@ -250,6 +271,7 @@ export const systemDesignProblems = [
         SearchSvc[Search Service]
     end
     subgraph Async
+        direction TB
         SQS[SQS Queue]
         ImgProc[Image Processor]
         VidProc[Video Transcoder]
@@ -258,6 +280,7 @@ export const systemDesignProblems = [
         Counter[Like Counter Flusher]
     end
     subgraph Storage
+        direction TB
         S3[(S3 Media)]
         PostDB[(Posts Cassandra)]
         FeedCache[(Feed Cache Redis)]
@@ -268,6 +291,7 @@ export const systemDesignProblems = [
         ES[(Elasticsearch)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
     end
@@ -303,6 +327,8 @@ export const systemDesignProblems = [
     EventBus --> Indexer --> ES
     EventBus --> Lake
 
+    Web ~~~ CDN ~~~ APIGW ~~~ UploadSvc ~~~ SQS ~~~ S3 ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -336,21 +362,25 @@ export const systemDesignProblems = [
       { section: 'Distributed Coordination', content: 'Use Redis as the shared state store across all API servers. Redis INCR is atomic. For high throughput, use local in-process counters with periodic sync to Redis (eventual consistency).' },
       { section: 'Response Headers', content: 'Always return X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset in response headers so clients can self-throttle.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web Client]
         Mobile[Mobile Client]
         API3rd[Third Party API Caller]
     end
     subgraph Edge
+        direction TB
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Middleware[Rate Limit Middleware]
         AuthSvc[Auth Service]
     end
     subgraph Services
+        direction TB
         TokenBucket[Token Bucket Algo]
         SlidingLog[Sliding Window Log Algo]
         FixedWin[Fixed Window Counter Algo]
@@ -360,15 +390,18 @@ export const systemDesignProblems = [
         Headers[Rate Limit Header Injector]
     end
     subgraph Async
+        direction TB
         SyncJob[Local to Central Sync Job]
         LogShipper[Decision Log Shipper]
     end
     subgraph Storage
+        direction TB
         RedisCluster[(Redis Cluster Shared State)]
         LocalCache[(Local In-Process Counter)]
         ConfigDB[(Limit Config DB)]
     end
     subgraph Analytics
+        direction TB
         Kafka[Kafka Decision Events]
         Lake[(Data Lake)]
     end
@@ -398,6 +431,8 @@ export const systemDesignProblems = [
     Headers --> API3rd
 
     Middleware --> Kafka --> LogShipper --> Lake
+
+    Web ~~~ LB ~~~ APIGW ~~~ TokenBucket ~~~ SyncJob ~~~ RedisCluster ~~~ Kafka
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -433,17 +468,20 @@ export const systemDesignProblems = [
       { section: 'Load Balancing', content: 'Round-robin or least-connections across healthy instances. Health checks run every 5s. Unhealthy instances removed from rotation immediately.' },
       { section: 'Observability', content: 'Every request logs: latency, status code, client_id, route. Emit to a centralized logging pipeline (Kafka → Elasticsearch). Prometheus metrics scraped per gateway instance.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web App]
         Mobile[Mobile App]
         Partner[Partner Service]
     end
     subgraph Edge
+        direction TB
         TLS[SSL TLS Termination]
         LB[Global Load Balancer]
     end
     subgraph Gateway [Gateway Pipeline]
+        direction TB
         GW[API Gateway Cluster]
         AuthMW[JWT and API Key Auth]
         RLMW[Rate Limiter Middleware]
@@ -452,6 +490,7 @@ export const systemDesignProblems = [
         TransformMW[Req and Resp Transformer]
     end
     subgraph Services
+        direction TB
         AuthSvc[Auth Service]
         SvcA[Service A]
         SvcB[Service B]
@@ -459,16 +498,19 @@ export const systemDesignProblems = [
         Health[Health Check Service]
     end
     subgraph Async
+        direction TB
         LogShipper[Log Shipper]
         MetricsAgg[Metrics Aggregator]
     end
     subgraph Storage
+        direction TB
         Registry[(Service Registry Consul)]
         RLRedis[(Rate Limit Redis)]
         KeyCache[(JWT Public Key Cache)]
         ConfigDB[(Routing Config)]
     end
     subgraph Analytics
+        direction TB
         Kafka[Kafka Access Logs]
         ELK[(Elasticsearch ELK)]
         Prom[(Prometheus Metrics)]
@@ -505,6 +547,8 @@ export const systemDesignProblems = [
     GW -->|metrics scrape| Prom --> Grafana
     GW --> MetricsAgg --> Prom
 
+    Web ~~~ TLS ~~~ GW ~~~ AuthSvc ~~~ LogShipper ~~~ Registry ~~~ Kafka
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -539,22 +583,26 @@ export const systemDesignProblems = [
       { section: 'Metadata & Search', content: 'Video metadata (title, description, tags, view count) stored in Cassandra. Full-text search via Elasticsearch. View counts use Redis counters flushed to DB asynchronously.' },
       { section: 'Observability', content: 'Key metrics: transcoding job queue depth and P99 processing time, CDN cache hit ratio per region (alert if <85%), playback error rate, buffering ratio per bitrate tier. Alerts: transcoding worker failures, CDN origin error spikes. Use a metrics pipeline (Prometheus → Grafana) and structured logs (ELK stack) for upload and playback events.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Web Player]
         Mobile[Mobile App]
         TV[TV / Console]
     end
     subgraph Edge
+        direction TB
         GeoDNS[Geo-DNS]
         CDN[CDN Edge PoPs]
         EdgeUp[Edge Upload Servers]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth and OAuth]
     end
     subgraph Services
+        direction TB
         Upload[Upload Service]
         Playback[Playback Service]
         Meta[Video Metadata Service]
@@ -568,6 +616,7 @@ export const systemDesignProblems = [
         Mod[Content Moderation]
     end
     subgraph Async [Async Pipelines]
+        direction TB
         TQ[Transcoding Queue]
         Workers[Transcoder Workers]
         Thumbs[Thumbnail Generator]
@@ -575,6 +624,7 @@ export const systemDesignProblems = [
         Trainer[Rec Model Training]
     end
     subgraph Storage
+        direction TB
         Raw[(Raw Video S3)]
         Enc[(Encoded Segments and HLS Manifests)]
         MetaDB[(Video Metadata Cassandra)]
@@ -584,6 +634,7 @@ export const systemDesignProblems = [
         UserDB[(User and Subs DB)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Event Bus]
         Lake[(Data Lake S3)]
         Feature[Feature Store]
@@ -622,6 +673,8 @@ export const systemDesignProblems = [
     APIGW --> Subs --> UserDB
     Subs --> Notif --> Mobile
 
+    Web ~~~ GeoDNS ~~~ APIGW ~~~ Upload ~~~ TQ ~~~ Raw ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -655,36 +708,42 @@ export const systemDesignProblems = [
       { section: 'Content Invalidation', content: 'Origin sends purge API calls to CDN control plane. Control plane propagates invalidation to all edge nodes (gossip protocol or pub-sub). Stale objects evicted on next request.' },
       { section: 'TLS Termination', content: 'TLS terminated at edge. Each PoP has the TLS certificate. Reduces TLS handshake RTT from ~150ms (origin) to <20ms (local edge). OCSP stapling avoids revocation lookups.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Browser[Browser]
         MobileApp[Mobile App]
         VideoPlayer[Video Player]
     end
     subgraph Edge
+        direction TB
         GeoDNS[Geo-DNS Anycast]
         EdgePoP[Edge PoP L1 Cache]
         TLS[TLS Termination at Edge]
         WAF[WAF and DDoS Shield]
     end
     subgraph Services
+        direction TB
         MidTier[Mid-tier Regional Cache L2]
         PurgeAPI[Purge and Invalidate API]
         Control[Control Plane]
         OCSP[OCSP Stapling Service]
     end
     subgraph Async
+        direction TB
         Gossip[Invalidation Gossip]
         LogAgg[Edge Log Aggregator]
         PrefetchJob[Prefetch and Prewarm Job]
     end
     subgraph Storage
+        direction TB
         EdgeSSD[(Edge SSD Cache)]
         MidHDD[(Mid-tier HDD Cache)]
         Origin[(Origin Server)]
         CertStore[(TLS Cert Store)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Access Logs]
         Lake[(Data Lake)]
     end
@@ -710,6 +769,8 @@ export const systemDesignProblems = [
     Control --> PrefetchJob --> EdgePoP
 
     EdgePoP --> EventBus --> LogAgg --> Lake
+
+    Browser ~~~ GeoDNS ~~~ MidTier ~~~ Gossip ~~~ EdgeSSD ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -744,22 +805,26 @@ export const systemDesignProblems = [
       { section: 'Recommendation Engine', content: 'Collaborative filtering on viewing history. A/B tested constantly. Model trained offline on Spark, served online via a feature store. Thumbnail personalization: different users see different cover images for the same show.' },
       { section: 'Playback State', content: 'Resume position stored in Cassandra keyed by (user_id, content_id). Synced across devices. Last write wins for concurrent sessions.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         TV[TV App]
         Mobile[Mobile App]
         Web[Web Player]
     end
     subgraph Edge
+        direction TB
         GeoDNS[Geo-DNS]
         OC[Open Connect ISP Appliances]
         Origin[Origin CDN Tier]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth and Profile Svc]
     end
     subgraph Services
+        direction TB
         Catalog[Catalog Service]
         SearchSvc[Search Service]
         Playback[Playback and License Svc]
@@ -770,6 +835,7 @@ export const systemDesignProblems = [
         ThumbPers[Thumbnail Personalization]
     end
     subgraph Async [Encoding and ML]
+        direction TB
         EncQ[Encoding Queue]
         Encoder[Per-Scene Encoder H264 H265 AV1]
         ThumbGen[Thumbnail Variant Generator]
@@ -777,6 +843,7 @@ export const systemDesignProblems = [
         Prepos[Pre-positioning Job]
     end
     subgraph Storage
+        direction TB
         Master[(Mezzanine Masters S3)]
         Variants[(Encoded Variants S3)]
         CatDB[(Catalog DB)]
@@ -786,6 +853,7 @@ export const systemDesignProblems = [
         BillDB[(Subscriptions DB)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
         Feature[Feature Store]
@@ -816,6 +884,8 @@ export const systemDesignProblems = [
 
     EventBus --> Lake --> RecTrain --> Feature
     Auth --> UserDB
+
+    TV ~~~ GeoDNS ~~~ APIGW ~~~ Catalog ~~~ EncQ ~~~ Master ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -850,16 +920,19 @@ export const systemDesignProblems = [
       { section: 'Conflict Resolution', content: 'Use vector clocks to detect concurrent writes. A vector clock is a per-node counter map (e.g., {A:2, B:1}) stored with each value. When node A writes, it increments its own counter. If two versions have incomparable clocks (neither dominates the other), they were written concurrently — a true conflict. On conflict, use last-write-wins (timestamp) or return both versions to the client for application-level resolution (DynamoDB shopping-cart pattern).' },
       { section: 'Failure Handling', content: 'Hinted handoff: if a node is temporarily down, another node stores writes with a hint to forward later. Anti-entropy (Merkle tree comparison) detects and repairs diverged replicas in the background.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         App[Application Client]
         SDK[KV SDK]
     end
     subgraph Gateway
+        direction TB
         LB[Load Balancer]
         Coord[Coordinator Node]
     end
     subgraph Services
+        direction TB
         Ring[Consistent Hash Ring]
         N1[Node 1 Primary]
         N2[Node 2 Replica]
@@ -870,12 +943,14 @@ export const systemDesignProblems = [
         Gossip[Gossip Membership]
     end
     subgraph Async
+        direction TB
         Hinted[Hinted Handoff Queue]
         AntiEntropy[Merkle Anti-Entropy Job]
         Compaction[SSTable Compaction]
         TTLSweeper[TTL Sweeper]
     end
     subgraph Storage
+        direction TB
         MemTable[(MemTable In-Memory)]
         WAL[(Write-Ahead Log)]
         SSTable[(SSTables on Disk)]
@@ -917,6 +992,8 @@ export const systemDesignProblems = [
     Gossip --> MetaDB
     Gossip --> Ring
 
+    App ~~~ LB ~~~ Ring ~~~ Hinted ~~~ MemTable
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -949,21 +1026,25 @@ export const systemDesignProblems = [
       { section: 'Conflict Resolution', content: 'If two clients modify the same file offline, detect conflict via version vectors. Create a conflict copy ("File (conflict copy, 2024-01-01)"). No automatic merge — user resolves.' },
       { section: 'Versioning', content: 'Each upload creates a new version row. Store all chunk references per version. Revert = swap the active version pointer. Storage cost = only unique chunks across all versions (dedup).' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Desktop[Desktop Sync Client]
         Mobile[Mobile App]
         WebUI[Web UI]
     end
     subgraph Edge
+        direction TB
         CDN[CDN for Downloads]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         UploadSvc[Chunk Upload Service]
         DownloadSvc[Download Service]
         MetaSvc[Metadata Service]
@@ -974,6 +1055,7 @@ export const systemDesignProblems = [
         SearchSvc[Search Service]
     end
     subgraph Async
+        direction TB
         DedupQ[Dedup Hash Lookup]
         ThumbGen[Thumbnail and Preview Gen]
         Indexer[Search Indexer]
@@ -981,6 +1063,7 @@ export const systemDesignProblems = [
         TrashGC[Trash Garbage Collector]
     end
     subgraph Storage
+        direction TB
         ChunkStore[(Chunk Blob Store S3)]
         MetaDB[(Metadata DB PostgreSQL)]
         ChunkIndex[(Chunk Hash Index)]
@@ -989,6 +1072,7 @@ export const systemDesignProblems = [
         ES[(Elasticsearch)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
     end
@@ -1019,6 +1103,8 @@ export const systemDesignProblems = [
     EventBus --> Lake
 
     MetaDB --> TrashGC --> ChunkStore
+
+    Desktop ~~~ CDN ~~~ APIGW ~~~ UploadSvc ~~~ DedupQ ~~~ ChunkStore ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -1053,17 +1139,20 @@ export const systemDesignProblems = [
       { section: 'Cache Aside Pattern', content: 'Application code reads from cache. On miss, reads from DB and populates cache with a TTL. On write, application writes to DB and either invalidates the cache key or updates it (write-through).' },
       { section: 'Thundering Herd Prevention', content: 'When a hot key expires, many requests simultaneously miss and hit the DB. Mitigations: (1) Add random jitter to TTLs. (2) Use mutex/lock for the first request to repopulate; others wait. (3) Background refresh before expiry.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         AppA[App Server A]
         AppB[App Server B]
         Worker[Background Worker]
     end
     subgraph Gateway
+        direction TB
         Proxy[Smart Client SDK]
         HashRing[Consistent Hash Router]
     end
     subgraph Services
+        direction TB
         Shard1Primary[Shard 1 Primary]
         Shard1Replica[Shard 1 Replica]
         Shard2Primary[Shard 2 Primary]
@@ -1073,6 +1162,7 @@ export const systemDesignProblems = [
         Mutex[Stampede Mutex Lock]
     end
     subgraph Async
+        direction TB
         EvictLRU[LRU Eviction Task]
         Repl[Async Replication Stream]
         TTLExpire[TTL Expiration Sweep]
@@ -1080,6 +1170,7 @@ export const systemDesignProblems = [
         RefreshAhead[Background Refresh]
     end
     subgraph Storage
+        direction TB
         Mem1[(Shard 1 RAM)]
         Mem2[(Shard 2 RAM)]
         MemN[(Shard N RAM)]
@@ -1118,6 +1209,8 @@ export const systemDesignProblems = [
     WarmJob --> Shard1Primary
     RefreshAhead --> Shard2Primary
 
+    AppA ~~~ Proxy ~~~ Shard1Primary ~~~ EvictLRU ~~~ Mem1
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     class Mem1,Mem2,MemN,DB,AOF,Snapshot storage
@@ -1147,18 +1240,21 @@ export const systemDesignProblems = [
       { section: 'Time Synchronization (TrueTime)', content: 'Spanner uses GPS+atomic clock (TrueTime) to assign globally ordered timestamps. CockroachDB uses HLC (Hybrid Logical Clocks) to approximate this without specialized hardware. Ensures cross-shard transaction ordering.' },
       { section: 'SQL Layer', content: 'SQL queries parsed and optimized into a distributed execution plan. The optimizer pushes predicates to the storage layer to minimize data transfer. Joins across shards use a distributed hash join or broadcast join.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         AppClient[App Client]
         SQLDriver[SQL Driver]
         AnalyticsClient[Analytics Client]
     end
     subgraph Gateway
+        direction TB
         LB[Load Balancer]
         SQLLayer[SQL Parser and Optimizer]
         Planner[Distributed Plan Executor]
     end
     subgraph Services
+        direction TB
         TxCoord[Transaction Coordinator]
         TwoPC[Two Phase Commit Manager]
         HLC[Hybrid Logical Clock]
@@ -1173,6 +1269,7 @@ export const systemDesignProblems = [
         SchemaSvc[Online Schema Change]
     end
     subgraph Async
+        direction TB
         Rebalancer[Range Rebalancer]
         Splitter[Range Splitter 64MB]
         Backup[Incremental Backup Job]
@@ -1180,6 +1277,7 @@ export const systemDesignProblems = [
         ReplLag[Replica Catch-up Worker]
     end
     subgraph Storage
+        direction TB
         RaftLog[(Raft Log)]
         RocksDB[(RocksDB Range Store)]
         MetaDB[(Range Metadata Table)]
@@ -1187,6 +1285,7 @@ export const systemDesignProblems = [
         CDCStream[(CDC Change Stream)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka CDC Bus]
         Warehouse[(Analytics Warehouse)]
     end
@@ -1225,6 +1324,8 @@ export const systemDesignProblems = [
 
     Range1Leader --> CDCStream --> EventBus --> Warehouse
 
+    AppClient ~~~ LB ~~~ TxCoord ~~~ Rebalancer ~~~ RaftLog ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -1258,21 +1359,25 @@ export const systemDesignProblems = [
       { section: 'User Preferences', content: 'Users store preferences in a NoSQL store: { userId, channel: { push: true, email: false }, types: { marketing: false, transactional: true } }. Checked before every send.' },
       { section: 'Rate Limiting per User', content: 'Apply per-user per-channel rate limits (e.g., max 5 marketing emails/week) using a Redis counter. Suppress excess notifications with a priority queue — high-priority (transactional) notifications always go through.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Mobile[Mobile App]
         Web[Web App]
         EmailInbox[Email Inbox]
         Phone[SMS Phone]
     end
     subgraph Edge
+        direction TB
         APNs[APNs and FCM Gateway]
     end
     subgraph Gateway
+        direction TB
         APIGW[Notification API]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         EventConsumer[Event Consumer]
         NotifRouter[Notification Router]
         PrefSvc[Preference Service]
@@ -1283,6 +1388,7 @@ export const systemDesignProblems = [
         PrioritySvc[Priority Queue Service]
     end
     subgraph Async
+        direction TB
         Kafka[Kafka Event Topics]
         PushQ[Push Queue]
         EmailQ[Email Queue]
@@ -1294,11 +1400,13 @@ export const systemDesignProblems = [
         DLQ[Dead Letter Queue]
     end
     subgraph Services2 [Providers]
+        direction TB
         FCM[FCM and APNs]
         SES[AWS SES SendGrid]
         Twilio[Twilio SMS]
     end
     subgraph Storage
+        direction TB
         PrefDB[(Preferences DB)]
         TemplateDB[(Templates DB)]
         IdempDB[(Idempotency Keys)]
@@ -1306,6 +1414,7 @@ export const systemDesignProblems = [
         ReceiptDB[(Delivery Receipts)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Analytics Bus]
         Lake[(Data Lake)]
     end
@@ -1336,6 +1445,8 @@ export const systemDesignProblems = [
     Twilio -->|status| ReceiptSvc
 
     ReceiptSvc --> EventBus --> Lake
+
+    Mobile ~~~ APNs ~~~ APIGW ~~~ EventConsumer ~~~ Kafka ~~~ PrefDB ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -1370,8 +1481,9 @@ export const systemDesignProblems = [
       { section: 'Acknowledgment & Retry', content: 'Subscriber sends ACK with message ID. Broker advances the offset. If no ACK within ackDeadline (e.g., 30s), message is redelivered to another subscriber. After N retries, message goes to a Dead Letter Queue (DLQ).' },
       { section: 'Fan-out', content: 'Multiple subscriptions on one topic each get an independent cursor on the same underlying log. No data is duplicated — just the offset pointer is maintained per subscription.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Pub1[Publisher A]
         Pub2[Publisher B]
         Sub1[Subscriber Service A]
@@ -1379,11 +1491,13 @@ export const systemDesignProblems = [
         SubPush[Push Subscriber Webhook]
     end
     subgraph Gateway
+        direction TB
         APIGW[Pub Sub API]
         AuthZ[Authn and IAM]
         AdminAPI[Admin API Topics and Subs]
     end
     subgraph Services
+        direction TB
         Publisher[Publish Handler]
         Router[Partition Router]
         SubMgr[Subscription Manager]
@@ -1394,6 +1508,7 @@ export const systemDesignProblems = [
         DLQSvc[Dead Letter Router]
     end
     subgraph Async
+        direction TB
         P1[Partition 1 Log]
         P2[Partition 2 Log]
         P3[Partition 3 Log]
@@ -1401,12 +1516,14 @@ export const systemDesignProblems = [
         RetentionGC[Retention GC 7 days]
     end
     subgraph Storage
+        direction TB
         LogStore[(Distributed Log Disk)]
         OffsetStore[(Subscription Offsets)]
         TopicMeta[(Topic and Sub Registry)]
         DLQStore[(Dead Letter Queue)]
     end
     subgraph Analytics
+        direction TB
         Metrics[Metrics Bus]
         Lake[(Audit Lake)]
     end
@@ -1440,6 +1557,8 @@ export const systemDesignProblems = [
     Publisher --> Metrics --> Lake
     AckSvc --> Metrics
 
+    Pub1 ~~~ APIGW ~~~ Publisher ~~~ P1 ~~~ LogStore ~~~ Metrics
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
@@ -1471,8 +1590,9 @@ export const systemDesignProblems = [
       { section: 'Consumer Groups', content: 'Each partition is consumed by exactly one consumer within a group. Multiple groups can read the same topic independently. Kafka tracks committed offsets per (group, topic, partition) in an internal topic (__consumer_offsets).' },
       { section: 'Log Compaction', content: 'Kafka can run log compaction on a topic: keep only the latest message per key (useful for CDC/change data capture). Combine with time-based retention for mixed workloads.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Prod1[Producer A]
         Prod2[Producer B]
         ConsA1[Consumer Group A Worker 1]
@@ -1481,10 +1601,12 @@ export const systemDesignProblems = [
         StreamApp[Stream Processor Flink]
     end
     subgraph Gateway
+        direction TB
         Bootstrap[Bootstrap Servers]
         SchemaReg[Schema Registry]
     end
     subgraph Services
+        direction TB
         Broker1[Broker 1]
         Broker2[Broker 2]
         Broker3[Broker 3]
@@ -1493,6 +1615,7 @@ export const systemDesignProblems = [
         ISR[ISR Tracker]
     end
     subgraph Async
+        direction TB
         P1Leader[Partition 1 Leader on B1]
         P1F1[Partition 1 Follower B2]
         P1F2[Partition 1 Follower B3]
@@ -1502,6 +1625,7 @@ export const systemDesignProblems = [
         MirrorMaker[MirrorMaker Cross Cluster]
     end
     subgraph Storage
+        direction TB
         Segments1[(Topic Segments Disk B1)]
         Segments2[(Topic Segments Disk B2)]
         Segments3[(Topic Segments Disk B3)]
@@ -1509,6 +1633,7 @@ export const systemDesignProblems = [
         MetaLog[(KRaft Metadata Log)]
     end
     subgraph Analytics
+        direction TB
         ConnectSink[Kafka Connect Sink]
         Warehouse[(Warehouse)]
     end
@@ -1545,6 +1670,8 @@ export const systemDesignProblems = [
     Retention --> Segments2
     P1Leader --> MirrorMaker --> ConnectSink --> Warehouse
 
+    Prod1 ~~~ Bootstrap ~~~ Broker1 ~~~ P1Leader ~~~ Segments1 ~~~ ConnectSink
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
@@ -1577,17 +1704,20 @@ export const systemDesignProblems = [
       { section: 'Real-time Updates', content: 'Driver app and rider app maintain WebSocket connections to a gateway. During a trip, the gateway forwards driver location to the rider\'s socket. Gateway cluster uses Redis pub/sub to route messages across gateway nodes.' },
       { section: 'Observability', content: 'Key metrics: match latency P99 (alert if >3s), location update staleness (alert if >10s gap for active driver), active WebSocket connections per gateway node, Redis GeoSet operation latency. Business metrics: match rate, cancel rate, surge multiplier per city. Dashboards split by city/region since demand is geographically localized.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         DriverApp[Driver App]
         RiderApp[Rider App]
     end
     subgraph Edge [Realtime Edge]
+        direction TB
         WSGW[WebSocket Gateway]
         APIGW[API Gateway]
         PubSub[Redis Pub Sub]
     end
     subgraph Services
+        direction TB
         LocSvc[Location Service]
         Match[Matching Service]
         Trip[Trip Service]
@@ -1599,12 +1729,14 @@ export const systemDesignProblems = [
         NotifSvc[Notification Service]
     end
     subgraph Async
+        direction TB
         EventBus[Kafka Trip Events]
         SurgeJob[Surge Aggregator H3 Hex]
         PayBatch[Payment Settlement]
         MLTrain[ETA Model Trainer]
     end
     subgraph Storage
+        direction TB
         GeoRedis[(Redis GeoSet)]
         TripRedis[(Active Trip Cache)]
         TripDB[(Completed Trips Cassandra)]
@@ -1614,6 +1746,7 @@ export const systemDesignProblems = [
         SurgeStore[(Surge Multiplier Cache)]
     end
     subgraph Analytics
+        direction TB
         Lake[(Data Lake)]
         Feature[Feature Store]
     end
@@ -1648,6 +1781,8 @@ export const systemDesignProblems = [
     EventBus --> SurgeJob --> SurgeStore
     Lake --> MLTrain --> Feature
 
+    DriverApp ~~~ WSGW ~~~ LocSvc ~~~ EventBus ~~~ GeoRedis ~~~ Lake
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -1681,23 +1816,27 @@ export const systemDesignProblems = [
       { section: 'Group Messaging', content: 'Fan-out service expands a group message to individual messages for each member. For large groups, this fan-out is async via a queue. Each member\'s Chat Server gets the message for their connected members.' },
       { section: 'End-to-End Encryption', content: 'Signal Protocol: each user has a public/private key pair. Messages encrypted with recipient\'s public key on sender\'s device. Server stores and routes only ciphertext — cannot read messages.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         UserA[User A Device]
         UserB[User B Device]
         GroupMember[Group Member Device]
         WebSession[Web Companion]
     end
     subgraph Edge
+        direction TB
         GeoDNS[Geo-DNS]
         WSLB[WebSocket Load Balancer]
         CDN[Media CDN]
     end
     subgraph Gateway
+        direction TB
         APIGW[REST API Gateway]
         Auth[Auth and Device Pairing]
     end
     subgraph Services
+        direction TB
         ChatA[Chat Server A]
         ChatB[Chat Server B]
         ChatC[Chat Server C]
@@ -1710,12 +1849,14 @@ export const systemDesignProblems = [
         ContactSvc[Contact and Profile Svc]
     end
     subgraph Async
+        direction TB
         FanoutQ[Group Fan-out Queue]
         MediaProc[Media Transcoder]
         OfflineDeliver[Offline Delivery Job]
         TombstoneGC[Delivered Message GC]
     end
     subgraph Storage
+        direction TB
         Registry[(Connection Registry Redis)]
         OfflineQ[(Offline Queue Cassandra)]
         UserDB[(User and Contacts DB)]
@@ -1725,6 +1866,7 @@ export const systemDesignProblems = [
         ReceiptDB[(Read Receipts)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Events]
         Lake[(Data Lake)]
     end
@@ -1764,6 +1906,8 @@ export const systemDesignProblems = [
     ChatA --> EventBus --> Lake
     OfflineQ --> TombstoneGC
 
+    UserA ~~~ GeoDNS ~~~ APIGW ~~~ ChatA ~~~ FanoutQ ~~~ Registry ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -1797,23 +1941,27 @@ export const systemDesignProblems = [
       { section: 'Latency Reduction', content: 'Standard HLS has ~20–30s glass-to-glass latency because the player buffers 3 segments (each typically 6–10s) before playback begins. Low-Latency HLS (LL-HLS) uses 200ms partial segments pushed to CDN, reducing latency to ~2–3s. WebRTC can achieve <1s latency but does not scale to millions of viewers via CDN.' },
       { section: 'Live Chat', content: 'Chat messages go through a separate WebSocket-based chat service. Messages stored in Redis pub/sub and fanout to all connected viewers for that stream. Moderation bots scan messages asynchronously.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Streamer[Streamer OBS]
         Viewer[Viewer Web]
         ViewerMobile[Viewer Mobile]
         ChatUser[Chat Viewer]
     end
     subgraph Edge
+        direction TB
         IngestEdge[RTMP Ingest Edge]
         CDNEdge[CDN Edge LL-HLS]
         WSGateway[Chat WebSocket Gateway]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth and Streamer Keys]
     end
     subgraph Services
+        direction TB
         StreamMgr[Stream Manager]
         TranscodeOrch[Transcoder Orchestrator]
         ChatSvc[Chat Service]
@@ -1824,6 +1972,7 @@ export const systemDesignProblems = [
         SubBilling[Subscription and Bits Svc]
     end
     subgraph Async
+        direction TB
         TranscoderFarm[Transcoder Workers 160 to 1080p]
         ManifestUpd[Manifest Updater]
         ChatPubSub[Chat Redis Pub Sub]
@@ -1831,6 +1980,7 @@ export const systemDesignProblems = [
         ThumbGen[Thumbnail Generator]
     end
     subgraph Storage
+        direction TB
         CDNOrigin[(CDN Origin Segments)]
         VODBlob[(VOD Archive S3)]
         StreamMeta[(Stream Metadata DB)]
@@ -1839,6 +1989,7 @@ export const systemDesignProblems = [
         DRMTokens[(DRM Token Store)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Watch Events]
         Lake[(Data Lake)]
     end
@@ -1866,6 +2017,8 @@ export const systemDesignProblems = [
 
     Viewer -->|watch event| EventBus
     StreamMgr --> EventBus --> Lake
+
+    Streamer ~~~ IngestEdge ~~~ APIGW ~~~ StreamMgr ~~~ TranscoderFarm ~~~ CDNOrigin ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -1900,20 +2053,24 @@ export const systemDesignProblems = [
       { section: 'Politeness & robots.txt', content: 'Fetch and cache robots.txt per domain (TTL 24h). Enforce crawl-delay from robots.txt or default to 1 req/sec. Use a token bucket per domain. Respect Disallow directives before fetching any page.' },
       { section: 'Content Storage', content: 'Raw HTML stored in S3. A fingerprint (SimHash) of the content stored in a DB to detect near-duplicate pages. Parsed content passed to an indexing pipeline via Kafka.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Seeds[Seed URL List]
         Sitemap[Sitemap Submitter]
         Web[Public Web]
     end
     subgraph Edge
+        direction TB
         DNSCache[DNS Resolver Cache]
         FetcherEgress[Egress Pool Many IPs]
     end
     subgraph Gateway
+        direction TB
         SchedAPI[Crawl Control API]
     end
     subgraph Services
+        direction TB
         FrontierMgr[Frontier Manager]
         Politeness[Politeness Token Bucket]
         RobotsSvc[Robots.txt Service]
@@ -1925,12 +2082,14 @@ export const systemDesignProblems = [
         IndexFeeder[Indexing Pipeline Feeder]
     end
     subgraph Async
+        direction TB
         FrontierQ[URL Frontier Kafka]
         DomainQ[Per Domain Queue Redis]
         ContentQ[Parsed Content Topic]
         RecrawlSched[Recrawl Scheduler]
     end
     subgraph Storage
+        direction TB
         BloomStore[(Bloom Filter)]
         SeenSet[(Seen URLs Cassandra)]
         RobotsCache[(Robots Cache Redis)]
@@ -1939,6 +2098,7 @@ export const systemDesignProblems = [
         DomainPRank[(Domain PageRank Store)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Crawl Metrics Bus]
         Lake[(Data Lake)]
     end
@@ -1967,6 +2127,8 @@ export const systemDesignProblems = [
     RecrawlSched --> FrontierQ
 
     Fetcher --> EventBus --> Lake
+
+    Seeds ~~~ DNSCache ~~~ SchedAPI ~~~ FrontierMgr ~~~ FrontierQ ~~~ BloomStore ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -2001,18 +2163,21 @@ export const systemDesignProblems = [
       { section: 'Sequence Number', content: '12-bit counter incremented per ID within the same millisecond. Resets to 0 on the next millisecond. If the sequence overflows (>4,095 IDs in one ms), the generator waits for the next millisecond.' },
       { section: 'Clock Skew Handling', content: 'If system clock goes backwards (NTP adjustment), IDs could duplicate. Mitigation: detect clock going backwards and wait for time to catch up. Log and alert on clock skew > 10ms.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         TweetSvc[Tweet Service]
         OrderSvc[Order Service]
         PaymentSvc[Payment Service]
         BatchJob[Batch Job]
     end
     subgraph Gateway
+        direction TB
         SDK[ID Generator SDK]
         LB[Load Balancer]
     end
     subgraph Services
+        direction TB
         IDGen1[ID Generator Node 1]
         IDGen2[ID Generator Node 2]
         IDGen3[ID Generator Node N]
@@ -2022,16 +2187,19 @@ export const systemDesignProblems = [
         BootstrapSvc[Machine ID Bootstrap]
     end
     subgraph Async
+        direction TB
         AlertJob[Clock Skew Alert]
         NTPSync[NTP Sync Daemon]
         MetricsAgg[Throughput Metrics]
     end
     subgraph Storage
+        direction TB
         ZK[(ZooKeeper Machine ID Registry)]
         EpochCfg[(Custom Epoch Config)]
         SkewLog[(Skew Event Log)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Metrics Bus]
         Dash[Grafana Dashboards]
     end
@@ -2060,6 +2228,8 @@ export const systemDesignProblems = [
 
     Composer -->|64-bit Snowflake ID| SDK
     SDK --> TweetSvc
+
+    TweetSvc ~~~ SDK ~~~ IDGen1 ~~~ AlertJob ~~~ ZK ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -2094,16 +2264,19 @@ export const systemDesignProblems = [
       { section: 'Node Removal', content: 'Reverse of addition. The removed node\'s key ranges are transferred to the next clockwise nodes. Again, only ~1/N keys are affected. Ring position table is updated in the cluster\'s metadata store.' },
       { section: 'Implementation', content: 'Store ring as a sorted array of (hash_value, node_id) pairs. Lookup = binary search for first position >= key_hash. O(log N) time. Additions/removals update the sorted array and trigger key migration for affected ranges.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         AppClient[Application Client]
         SDK[Smart Client SDK]
     end
     subgraph Gateway
+        direction TB
         Hasher[Hash Function MurmurHash3]
         Lookup[Ring Lookup Binary Search]
     end
     subgraph Services
+        direction TB
         Ring[Hash Ring 0 to 2 to the 32]
         NodeA[Node A vnodes 150]
         NodeB[Node B vnodes 150]
@@ -2113,11 +2286,13 @@ export const systemDesignProblems = [
         Rebalancer[Range Rebalancer]
     end
     subgraph Async
+        direction TB
         Migrate[Key Migration Stream]
         HintedHandoff[Hinted Handoff Queue]
         VnodeBalancer[Vnode Load Balancer]
     end
     subgraph Storage
+        direction TB
         RingTable[(Sorted Ring Position Table)]
         ClusterMeta[(Cluster Metadata Store)]
         KeyShardA[(Keys on A)]
@@ -2154,6 +2329,8 @@ export const systemDesignProblems = [
     Membership --> HintedHandoff --> NodeA
     VnodeBalancer --> Ring
 
+    AppClient ~~~ Hasher ~~~ Ring ~~~ Migrate ~~~ RingTable
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     class RingTable,ClusterMeta,KeyShardA,KeyShardB,KeyShardC storage
@@ -2183,17 +2360,20 @@ export const systemDesignProblems = [
       { section: 'Sequencer Nodes (ZooKeeper Pattern)', content: 'ZooKeeper-style: clients create ephemeral sequential nodes under a lock path. The node with the lowest sequence number holds the lock. Others watch the node immediately before them. On deletion, the next node gets notified — no thundering herd.' },
       { section: 'RedLock (Redis)', content: 'Redis-based: acquire lock on majority (N/2+1) of N independent Redis nodes using SET NX PX. Considered safe if clock drift < TTL/3. Controversial — Martin Kleppmann argues it is not safe under GC pauses. Use Raft-based locks for correctness-critical scenarios.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         ClientA[Worker A]
         ClientB[Worker B]
         ClientC[Worker C]
     end
     subgraph Gateway
+        direction TB
         LockSDK[Lock SDK]
         LB[Load Balancer]
     end
     subgraph Services
+        direction TB
         LockSvc[Lock Service API]
         RaftLeader[Raft Leader]
         RaftF1[Raft Follower 1]
@@ -2204,17 +2384,20 @@ export const systemDesignProblems = [
         Watcher[Watch Notifier]
     end
     subgraph Async
+        direction TB
         LeaseExpiry[Lease Expiry Sweeper]
         ElectionJob[Leader Election]
         SnapshotJob[Raft Snapshot]
     end
     subgraph Storage
+        direction TB
         RaftLog[(Replicated Raft Log)]
         LockState[(Lock State KV)]
         TokenCounter[(Monotonic Fencing Counter)]
         Snapshot[(Snapshot Store)]
     end
     subgraph Services2 [Protected Resource]
+        direction TB
         Resource[Database or Inventory]
         ResourceGuard[Token Validator]
     end
@@ -2244,6 +2427,8 @@ export const systemDesignProblems = [
 
     ElectionJob --> RaftLeader
     SnapshotJob --> Snapshot
+
+    ClientA ~~~ LockSDK ~~~ LockSvc ~~~ LeaseExpiry ~~~ RaftLog
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -2276,21 +2461,25 @@ export const systemDesignProblems = [
       { section: 'Ranking (PageRank + ML)', content: 'Base relevance: BM25 TF-IDF. PageRank computed offline via iterative graph algorithm (each page\'s rank flows to outbound links). ML ranking model (BERT-based, trained on click data) reranks the top-K candidates at query time.' },
       { section: 'Serving Tier', content: 'Query hits a root server, which fans out to hundreds of leaf index servers in parallel. Each leaf returns its local top-K. Root merges all results, applies global ranking, fetches document snippets, returns top 10.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Browser[Browser]
         MobileApp[Mobile App]
         VoiceSearch[Voice Search]
     end
     subgraph Edge
+        direction TB
         CDN[Global Edge Cache]
         GeoDNS[Geo-DNS]
     end
     subgraph Gateway
+        direction TB
         APIGW[Search Frontend]
         AntiSpam[Spam and Bot Filter]
     end
     subgraph Services
+        direction TB
         QueryParser[Query Parser and Tokenizer]
         SpellCheck[Spell Correction]
         Autosug[Autosuggest Service]
@@ -2304,6 +2493,7 @@ export const systemDesignProblems = [
         AdServer[Ads Server]
     end
     subgraph Async
+        direction TB
         Crawler[Distributed Crawler]
         Indexer[Index Builder MapReduce]
         PageRankJob[PageRank Iterative]
@@ -2311,6 +2501,7 @@ export const systemDesignProblems = [
         ClickLog[Click Log Pipeline]
     end
     subgraph Storage
+        direction TB
         BlobStore[(Crawled HTML S3)]
         InvIdx1[(Inverted Index Shard 1)]
         InvIdx2[(Inverted Index Shard 2)]
@@ -2320,6 +2511,7 @@ export const systemDesignProblems = [
         QueryCache[(Hot Query Cache)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Search Events]
         Lake[(Data Lake)]
         ModelStore[ML Model Store]
@@ -2356,6 +2548,8 @@ export const systemDesignProblems = [
     Browser -->|click| ClickLog --> EventBus --> Lake
     Lake --> ModelStore
 
+    Browser ~~~ CDN ~~~ APIGW ~~~ QueryParser ~~~ Crawler ~~~ BlobStore ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -2389,21 +2583,25 @@ export const systemDesignProblems = [
       { section: 'Caching Layer', content: 'In-memory cache (Redis) for the most popular prefixes (top 10K). Cache hit rate >90%. Cache updated asynchronously when scores change. Cache first, trie fallback for cache misses.' },
       { section: 'Real-time Trending', content: 'Stream search logs through Kafka. A streaming job (Flink) aggregates counts over a 1-hour sliding window. Top trending queries injected into the suggestion layer with a boost factor.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Browser[Browser Search Box]
         Mobile[Mobile App]
         Voice[Voice Assistant]
     end
     subgraph Edge
+        direction TB
         CDN[CDN Edge]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Suggestion API]
         RL[Rate Limiter]
     end
     subgraph Services
+        direction TB
         Router[Prefix Shard Router]
         TrieShardA[Trie Server Shard A]
         TrieShardB[Trie Server Shard B]
@@ -2413,6 +2611,7 @@ export const systemDesignProblems = [
         TrendBoost[Trending Booster]
     end
     subgraph Async
+        direction TB
         Kafka[Search Log Stream]
         SparkBatch[Spark Batch Scoring]
         FlinkStream[Flink Sliding Window]
@@ -2420,6 +2619,7 @@ export const systemDesignProblems = [
         CacheWarmer[Hot Prefix Cache Warmer]
     end
     subgraph Storage
+        direction TB
         HotCache[(Redis Top 10K Prefixes)]
         TrieSnapshot[(Trie Snapshot S3)]
         FreqDB[(Frequency Score DB)]
@@ -2427,6 +2627,7 @@ export const systemDesignProblems = [
         UserProfile[(User History Store)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Query Events Bus]
         Lake[(Data Lake)]
     end
@@ -2457,6 +2658,8 @@ export const systemDesignProblems = [
     Kafka --> FlinkStream --> TrendStore
     EventBus --> Lake
     HotCache --> CacheWarmer
+
+    Browser ~~~ CDN ~~~ APIGW ~~~ Router ~~~ Kafka ~~~ HotCache ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -2491,21 +2694,25 @@ export const systemDesignProblems = [
       { section: 'Personalized Ranking', content: 'Base ranking: BM25 + business rules (promoted products, in-stock penalty). Personalization layer: re-rank top-200 results using a learned ranking model (LambdaMART or two-tower neural model) trained on click/purchase data. Applied per user in < 50ms.' },
       { section: 'Index Updates', content: 'Product catalog changes flow through Kafka. An indexing consumer reads events and calls Elasticsearch bulk API. Price/inventory changes indexed within 5 minutes. New product launches indexed immediately.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Shopper[Web Shopper]
         MobileApp[Mobile App]
         VoiceAssist[Voice Search]
     end
     subgraph Edge
+        direction TB
         CDN[CDN Static Assets]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Search API]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         QueryParser[Query Parser]
         AutoSug[Autocomplete Service]
         ESCluster[Elasticsearch Cluster]
@@ -2517,6 +2724,7 @@ export const systemDesignProblems = [
         SpellSvc[Spell Suggester]
     end
     subgraph Async
+        direction TB
         Kafka[Catalog Change Events]
         BulkIndexer[Bulk Index Consumer]
         ClickStream[Click and Purchase Stream]
@@ -2524,6 +2732,7 @@ export const systemDesignProblems = [
         PriceUpdate[Price Inventory Updater]
     end
     subgraph Storage
+        direction TB
         ESIndex[(Elasticsearch Index 20 shards)]
         Catalog[(Product Catalog DB)]
         UserProfile[(User Click History)]
@@ -2532,6 +2741,7 @@ export const systemDesignProblems = [
         InventoryDB[(Inventory DB)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Behavioral Events]
         Lake[(Data Lake)]
         FeatureStore[Feature Store]
@@ -2563,6 +2773,8 @@ export const systemDesignProblems = [
     Shopper -->|click or buy| ClickStream --> EventBus
     EventBus --> Lake --> ModelTrainer --> ModelStore --> Ranker
     Lake --> FeatureStore
+
+    Shopper ~~~ CDN ~~~ APIGW ~~~ QueryParser ~~~ Kafka ~~~ ESIndex ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -2597,22 +2809,26 @@ export const systemDesignProblems = [
       { section: 'PSP Integration', content: 'Actual card processing delegated to a Payment Service Provider (Stripe, Adyen). System stores a PSP-provided token, not raw card numbers (PCI compliance). PSP webhooks update local payment status.' },
       { section: 'Reconciliation', content: 'Nightly reconciliation job compares internal ledger with PSP settlement files. Any discrepancy triggers an alert. Separate settlement service handles payouts to merchants with configurable delay (e.g., T+2).' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Merchant[Merchant API]
         Checkout[Checkout Page]
         MobileSDK[Mobile SDK]
     end
     subgraph Edge
+        direction TB
         WAF[WAF and DDoS Shield]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Payment API]
         Auth[Auth and API Keys]
         IdempCheck[Idempotency Middleware]
     end
     subgraph Services
+        direction TB
         Authorize[Authorization Service]
         Capture[Capture Service]
         Refund[Refund Service]
@@ -2625,6 +2841,7 @@ export const systemDesignProblems = [
         SettleSvc[Settlement Service]
     end
     subgraph Async
+        direction TB
         Recon[Nightly Reconciliation Job]
         RetryQ[Failed Webhook Retry]
         FraudTrainer[Fraud Model Trainer]
@@ -2632,11 +2849,13 @@ export const systemDesignProblems = [
         DLQ[Dead Letter Queue]
     end
     subgraph Services2 [PSPs]
+        direction TB
         Stripe[PSP Stripe]
         Adyen[PSP Adyen]
         BankRail[ACH and Wire Rails]
     end
     subgraph Storage
+        direction TB
         IdempDB[(Idempotency Key Store)]
         Ledger[(Double Entry Ledger Append Only)]
         TxnDB[(Transaction State DB)]
@@ -2646,6 +2865,7 @@ export const systemDesignProblems = [
         AuditLog[(Audit Trail)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Kafka Payment Events]
         Lake[(Data Lake)]
     end
@@ -2686,6 +2906,8 @@ export const systemDesignProblems = [
 
     Authorize --> EventBus --> Lake --> FraudTrainer --> FraudFeatures
 
+    Merchant ~~~ WAF ~~~ APIGW ~~~ Authorize ~~~ Recon ~~~ IdempDB ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -2719,22 +2941,26 @@ export const systemDesignProblems = [
       { section: 'Two-Phase Reservation', content: 'HOLD: reserve room with 10-minute TTL (user must complete payment). CONFIRM: on successful payment, confirm reservation and remove TTL. RELEASE: if payment not received within TTL, release the hold. Prevents rooms being blocked indefinitely.' },
       { section: 'Search Service', content: 'Separate read-optimized search index (Elasticsearch). Hotel inventory replicated to ES via change data capture (Debezium). Search results may be slightly stale (acceptable). Actual availability check done against the source DB at booking time.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Traveler[Traveler Web]
         Mobile[Mobile App]
         HotelMgr[Hotel Manager Console]
     end
     subgraph Edge
+        direction TB
         CDN[CDN Static Assets]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[Auth Service]
         RL[Rate Limiter]
     end
     subgraph Services
+        direction TB
         SearchSvc[Search Service]
         AvailSvc[Availability Service]
         BookingSvc[Booking Service]
@@ -2748,6 +2974,7 @@ export const systemDesignProblems = [
         NotifySvc[Email and Push Notifier]
     end
     subgraph Async
+        direction TB
         CDCStream[Inventory CDC Debezium]
         HoldExpiry[Hold TTL Sweeper]
         Indexer[Search Indexer]
@@ -2755,6 +2982,7 @@ export const systemDesignProblems = [
         EmailQ[Confirmation Email Queue]
     end
     subgraph Storage
+        direction TB
         InventoryDB[(Inventory DB PostgreSQL)]
         BookingDB[(Bookings DB)]
         ES[(Elasticsearch Hotel Index)]
@@ -2764,6 +2992,7 @@ export const systemDesignProblems = [
         PriceDB[(Rate and Price History)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Booking Events]
         Lake[(Data Lake)]
     end
@@ -2800,6 +3029,8 @@ export const systemDesignProblems = [
 
     BookingSvc --> EventBus --> Lake
 
+    Traveler ~~~ CDN ~~~ APIGW ~~~ SearchSvc ~~~ CDCStream ~~~ InventoryDB ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -2833,21 +3064,25 @@ export const systemDesignProblems = [
       { section: 'Dynamic Pricing', content: 'Fares are rule-based (fare class, advance purchase, day-of-week, seat class). Pricing engine evaluates fare rules at query time. Machine learning models predict demand and adjust base fares (yield management). Prices change every few minutes.' },
       { section: 'Ticketing', content: 'On successful payment, send ticketing request to airline (via GDS or NDC). Airline generates e-ticket (confirmed PNR). Send itinerary to user via email. Store booking details in our DB with airline PNR reference.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Web[Traveler Web]
         Mobile[Mobile App]
         Agent[Travel Agent Tool]
     end
     subgraph Edge
+        direction TB
         CDN[CDN]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Booking API]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         SearchSvc[Multi-City Search]
         FareSvc[Fare Quote Service]
         PricingEngine[Fare Rule Pricing Engine]
@@ -2862,6 +3097,7 @@ export const systemDesignProblems = [
         Notifier[Email and SMS Notifier]
     end
     subgraph Async
+        direction TB
         CacheRefresh[Fare Cache Refresher]
         HoldExpiry[PNR Hold Expiry Sweeper]
         PriceTrainer[Yield Model Trainer]
@@ -2869,12 +3105,14 @@ export const systemDesignProblems = [
         FailRetry[Provider Retry Queue]
     end
     subgraph Services2 [External]
+        direction TB
         GDSAmadeus[GDS Amadeus]
         GDSSabre[GDS Sabre]
         AirlineNDC[Airline NDC API]
         AirlinePSS[Airline PSS]
     end
     subgraph Storage
+        direction TB
         FareCache[(Fare Cache Redis 5min TTL)]
         ItineraryDB[(Itinerary DB)]
         BookingDB[(Booking DB)]
@@ -2883,6 +3121,7 @@ export const systemDesignProblems = [
         PriceHistory[(Pricing Model Store)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Booking Events]
         Lake[(Data Lake)]
     end
@@ -2924,6 +3163,8 @@ export const systemDesignProblems = [
 
     BookingSvc --> EventBus --> Lake
 
+    Web ~~~ CDN ~~~ APIGW ~~~ SearchSvc ~~~ CacheRefresh ~~~ FareCache ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -2957,22 +3198,26 @@ export const systemDesignProblems = [
       { section: 'Audit Trail', content: 'Every order event (submitted, modified, cancelled, filled) written to an immutable append-only ledger (Kafka + cold storage). Sequence numbers assigned by the matching engine. Used for regulatory reporting and post-trade analysis.' },
       { section: 'Risk Controls', content: 'Pre-trade risk checks before order reaches the matching engine: position limits, order size limits, price band checks (reject orders too far from market price). Prevents erroneous orders (fat-finger errors) that could crash the market.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         RetailTrader[Retail Trader]
         Algo[Algo Trader]
         FIXClient[FIX Institutional Client]
         Display[Price Display Subscriber]
     end
     subgraph Edge
+        direction TB
         ColocGW[Colo Order Gateway FPGA]
         WSGW[WebSocket Market Data Gateway]
     end
     subgraph Gateway
+        direction TB
         APIGW[Order API]
         Auth[Auth and Entitlements]
     end
     subgraph Services
+        direction TB
         RiskEngine[Pre Trade Risk Engine]
         OrderRouter[Order Router]
         MatchAAPL[Matching Engine AAPL]
@@ -2985,6 +3230,7 @@ export const systemDesignProblems = [
         MarketDataSvc[Market Data Distribution]
     end
     subgraph Async
+        direction TB
         AuditStream[Audit Sequencer Kafka]
         MDStream[Market Data Feed Kafka]
         Reconcile[End of Day Reconcile]
@@ -2992,6 +3238,7 @@ export const systemDesignProblems = [
         SurveillanceJob[Surveillance Replay]
     end
     subgraph Storage
+        direction TB
         AuditLog[(Append Only Audit Log)]
         PortfolioDB[(Portfolio DB)]
         SettleDB[(Settlement DB)]
@@ -3000,6 +3247,7 @@ export const systemDesignProblems = [
         ColdS3[(Cold Archive S3)]
     end
     subgraph Analytics
+        direction TB
         TickStore[(Tick Data Warehouse)]
         Dash[Trading Dashboards]
     end
@@ -3029,6 +3277,8 @@ export const systemDesignProblems = [
     SettleDB --> Reconcile
 
     MDStream --> TickStore --> Dash
+
+    RetailTrader ~~~ ColocGW ~~~ APIGW ~~~ RiskEngine ~~~ AuditStream ~~~ AuditLog ~~~ TickStore
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -3063,22 +3313,26 @@ export const systemDesignProblems = [
       { section: 'Friend Leaderboard', content: 'Store friends as a Redis Set per player. To compute friend leaderboard: ZUNIONSTORE temp_key 1 leaderboard WEIGHTS 1 AGGREGATE MAX using player IDs filtered by friend list. Or: fetch all friend scores with ZSCORE and rank client-side (feasible for friend lists < 1000).' },
       { section: 'Persistence & Sharding', content: 'Redis RDB snapshots + AOF for persistence. For >1B players: shard by game_id or player_id range across multiple Redis instances. Consistent hashing for shard routing. Each shard holds a subset of the global leaderboard — cross-shard merge needed for global top-N.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         Player[Player Client]
         Spectator[Spectator UI]
         GameServer[Game Server]
         Esports[Esports Broadcast]
     end
     subgraph Edge
+        direction TB
         CDN[Edge Cache Top N]
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Leaderboard API]
         Auth[Auth Service]
     end
     subgraph Services
+        direction TB
         ScoreSvc[Score Update Service]
         TopNSvc[Top N Query Service]
         RankSvc[Player Rank Service]
@@ -3089,12 +3343,14 @@ export const systemDesignProblems = [
         ShardRouter[Shard Router Consistent Hash]
     end
     subgraph Async
+        direction TB
         AOF[AOF Persistence]
         SnapshotJob[RDB Snapshot Job]
         SeasonRollover[Season Rollover Job]
         MergeTopN[Cross Shard Top N Merger]
     end
     subgraph Storage
+        direction TB
         RedisShard1[(Redis ZSET Shard 1)]
         RedisShard2[(Redis ZSET Shard 2)]
         RedisShardN[(Redis ZSET Shard N)]
@@ -3103,6 +3359,7 @@ export const systemDesignProblems = [
         PlayerDB[(Player Profile DB)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Game Events Bus]
         Lake[(Data Lake)]
     end
@@ -3135,6 +3392,8 @@ export const systemDesignProblems = [
     RedisShard1 --> SnapshotJob
 
     ScoreSvc --> EventBus --> Lake
+
+    Player ~~~ CDN ~~~ APIGW ~~~ ScoreSvc ~~~ AOF ~~~ RedisShard1 ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -3169,23 +3428,27 @@ export const systemDesignProblems = [
       { section: 'Request Routing & Queuing', content: 'API Gateway authenticates API keys, checks rate limits (token bucket in Redis), and routes to the correct model cluster. A scheduler queue (Redis or Kafka) holds pending requests. The inference scheduler pulls from the queue and bins-packs requests by sequence length to minimise padding waste. Streaming responses are sent back via SSE (Server-Sent Events) or WebSocket.' },
       { section: 'Observability & Cost', content: 'Token counters per API key feed the billing system (token-in × price_in + token-out × price_out). GPU utilisation, queue depth, and time-to-first-token are key SLIs. Auto-scaling triggers on queue depth: if queue grows > 100 requests, spin up another inference pod. Use spot/preemptible GPUs for non-latency-sensitive batch workloads.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         DevA[Developer App]
         ChatUI[Chat UI]
         Batch[Batch Inference Job]
     end
     subgraph Edge
+        direction TB
         LB[Global Load Balancer]
         SSE[SSE and WebSocket Streaming]
     end
     subgraph Gateway
+        direction TB
         APIGW[API Gateway]
         Auth[API Key Auth]
         TokenBucket[Token Bucket Rate Limit Redis]
         ModelRouter[Model Cluster Router]
     end
     subgraph Services
+        direction TB
         Scheduler[Inference Scheduler]
         ContBatch[Continuous Batcher]
         PrefillEng[Prefill Engine]
@@ -3197,6 +3460,7 @@ export const systemDesignProblems = [
         CancelSvc[Cancellation Service]
     end
     subgraph Async
+        direction TB
         Queue[Request Queue Redis or Kafka]
         Meter[Usage Metering Aggregator]
         Autoscaler[GPU Pod Autoscaler]
@@ -3204,6 +3468,7 @@ export const systemDesignProblems = [
         WarmUp[Model Warmup Loader]
     end
     subgraph Storage
+        direction TB
         KVCache[(KV Cache GPU HBM)]
         CPUSwap[(CPU RAM KV Swap)]
         ModelWeights[(Model Weights NFS or S3)]
@@ -3211,6 +3476,7 @@ export const systemDesignProblems = [
         RateLimitRedis[(Rate Limit Redis)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Inference Telemetry Bus]
         Metrics[(Prom Metrics Store)]
         Dash[Grafana Dashboards]
@@ -3247,6 +3513,8 @@ export const systemDesignProblems = [
 
     Scheduler --> EventBus --> Metrics --> Dash
 
+    DevA ~~~ LB ~~~ APIGW ~~~ Scheduler ~~~ Queue ~~~ KVCache ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
@@ -3281,8 +3549,9 @@ export const systemDesignProblems = [
       { section: 'Re-ranking', content: 'ANN retrieval optimises for embedding similarity, which is a proxy for relevance. A cross-encoder re-ranker (e.g. Cohere Rerank, a fine-tuned BERT) takes the query + each candidate chunk and scores them jointly — much more accurate than bi-encoder similarity but too slow to run on all documents. Run re-ranker on the top-50 ANN results, return top-5. Adds ~100ms but significantly improves answer quality.' },
       { section: 'LLM Context Assembly & Prompting', content: 'Assemble a prompt: system instructions + top-5 retrieved passages (each labelled [Source 1], [Source 2]…) + user question. Ask the LLM to answer using only the provided sources and cite them. If no source is relevant, instruct the model to say so rather than hallucinate. Stream the response. Post-process to extract citation markers and map them to doc metadata for the UI.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         WikiSync[Wiki Sync Connector]
         SlackSync[Slack Connector]
         PDFUpload[PDF Upload]
@@ -3290,14 +3559,17 @@ export const systemDesignProblems = [
         AdminUI[Admin Console]
     end
     subgraph Edge
+        direction TB
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         QueryAPI[Query API]
         IngestAPI[Ingest API]
         Auth[Auth and ACL Resolver]
     end
     subgraph Services
+        direction TB
         Parser[Document Parser Tika and BS4]
         Chunker[Semantic Chunker]
         EmbedSvc[Embedding Service Bi Encoder]
@@ -3311,6 +3583,7 @@ export const systemDesignProblems = [
         FeedbackSvc[User Feedback Service]
     end
     subgraph Async
+        direction TB
         Kafka[Ingestion Queue Kafka]
         EmbedWorker[Embedding Worker Pool]
         ReindexJob[Reindex on Update Job]
@@ -3318,6 +3591,7 @@ export const systemDesignProblems = [
         DeleteJob[Tombstone Cleanup]
     end
     subgraph Storage
+        direction TB
         VectorDB[(Vector DB HNSW)]
         DocStore[(Doc Store S3)]
         MetaDB[(Chunk Metadata DB)]
@@ -3326,6 +3600,7 @@ export const systemDesignProblems = [
         FeedbackDB[(Feedback DB)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Query Telemetry]
         Lake[(Data Lake)]
     end
@@ -3358,6 +3633,8 @@ export const systemDesignProblems = [
     DeleteJob --> VectorDB
 
     QueryAPI --> EventBus --> Lake
+
+    WikiSync ~~~ LB ~~~ QueryAPI ~~~ Parser ~~~ Kafka ~~~ VectorDB ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -3393,18 +3670,21 @@ export const systemDesignProblems = [
       { section: 'Streaming Materialisation', content: 'For features that must be fresh within minutes (e.g. "user click count in last 10 minutes"), a streaming pipeline (Flink or Spark Streaming) consumes the source Kafka topic, applies the transformation (windowed aggregation), and writes results to the online store in real time. Streaming features co-exist with batch features under the same entity key in Redis.' },
       { section: 'Serving SDK & Consistency', content: 'Model inference code calls feature_store.get_online_features(entity_ids, feature_names). The SDK batches multiple entity lookups into a single Redis pipeline call. A common footgun: training used offline features; inference uses online features — if the two materialisation pipelines apply transformations differently, training-serving skew silently degrades model performance. The fix: share transformation logic in a single feature transformation library used by both pipelines.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         DataSci[Data Scientist]
         TrainingPipeline[Model Training Pipeline]
         InferenceSvc[Online Inference Service]
         DataCatalog[Data Catalog UI]
     end
     subgraph Gateway
+        direction TB
         SDK[Feature Store SDK]
         RegistryAPI[Feature Registry API]
     end
     subgraph Services
+        direction TB
         Registry[Feature Registry]
         TransformLib[Shared Transformation Library]
         OfflineSvc[Offline Materialization Svc]
@@ -3415,6 +3695,7 @@ export const systemDesignProblems = [
         ServeBatcher[HGETALL Pipeline Batcher]
     end
     subgraph Async
+        direction TB
         SparkBatch[Spark Batch Job]
         FlinkStream[Flink Streaming Job]
         Backfill[Backfill Job]
@@ -3422,6 +3703,7 @@ export const systemDesignProblems = [
         SkewDetector[Training Serving Skew Detector]
     end
     subgraph Storage
+        direction TB
         DW[(Data Warehouse Snowflake)]
         OfflineStore[(Offline Store S3 Parquet)]
         OnlineStore[(Online Store Redis)]
@@ -3429,6 +3711,7 @@ export const systemDesignProblems = [
         LineageDB[(Lineage DB)]
     end
     subgraph Analytics
+        direction TB
         Kafka[Kafka Event Streams]
         EventBus[Feature Telemetry]
         Dash[Monitoring Dashboards]
@@ -3459,6 +3742,8 @@ export const systemDesignProblems = [
 
     OnlineSvc --> EventBus --> Dash
     FreshnessMon --> EventBus
+
+    DataSci ~~~ SDK ~~~ Registry ~~~ SparkBatch ~~~ DW ~~~ Kafka
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
@@ -3492,19 +3777,22 @@ export const systemDesignProblems = [
       { section: 'Model Registry', content: 'After a training run, the data scientist registers the best checkpoint to the model registry: a versioned catalogue of trained models. Each version records: training run ID (lineage back to code + data + hyperparameters), evaluation metrics, and a lifecycle stage (None → Staging → Production → Archived). The inference platform reads model URIs from the registry to deploy — decoupling training from serving and enabling safe rollbacks.' },
       { section: 'Fault Tolerance & Checkpointing', content: 'Long training runs (days on 512 GPUs) are expensive to restart from scratch. The platform periodically saves checkpoints to S3 (every N steps). On node failure, the job is automatically restarted from the latest checkpoint. Spot/preemptible instance interruptions are handled via a "checkpoint on SIGTERM" signal handler injected by the platform. Elastic training (PyTorch Elastic) allows a job to continue with fewer nodes after a failure rather than full restart.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         DataSci[Data Scientist]
         CLI[CLI and SDK]
         Notebook[Jupyter Notebook]
         InferencePlatform[Inference Platform]
     end
     subgraph Gateway
+        direction TB
         JobAPI[Job Submit API]
         Auth[Auth and Quota Service]
         UI[Web UI]
     end
     subgraph Services
+        direction TB
         Scheduler[Gang Scheduler Volcano]
         K8sCtl[Kubernetes Control Plane]
         ResourceMgr[Resource and Quota Mgr]
@@ -3517,6 +3805,7 @@ export const systemDesignProblems = [
         Promotion[Stage Promotion Service]
     end
     subgraph Async
+        direction TB
         CheckpointJob[Periodic Checkpoint Saver]
         SpotInterrupt[Spot Preempt Handler]
         ArtifactGC[Old Artifact GC]
@@ -3524,6 +3813,7 @@ export const systemDesignProblems = [
         BillingAgg[GPU Hours Billing]
     end
     subgraph Storage
+        direction TB
         GPUPoolA100[GPU Pool A100]
         GPUPoolH100[GPU Pool H100]
         CPUPool[CPU Pool]
@@ -3534,6 +3824,7 @@ export const systemDesignProblems = [
         DatasetCatalog[(Dataset Catalog)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Job Telemetry Bus]
         Dash[Grafana Dashboards]
     end
@@ -3569,6 +3860,8 @@ export const systemDesignProblems = [
     GPUPoolA100 --> BillingAgg
     BillingAgg --> EventBus --> Dash
 
+    DataSci ~~~ JobAPI ~~~ Scheduler ~~~ CheckpointJob ~~~ GPUPoolA100 ~~~ EventBus
+
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
     classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
@@ -3601,21 +3894,25 @@ export const systemDesignProblems = [
       { section: 'Distributed Architecture', content: 'Shard vectors across nodes by ID range or consistent hashing. Each shard holds a full HNSW index for its vectors. At query time, the query is broadcast to all shards (scatter); each shard returns its local top-K; the coordinator merges and re-ranks the global top-K (gather). Replication factor of 3 for read availability and fault tolerance. Writes go to a primary shard; the primary updates its HNSW index and replicates asynchronously to replicas.' },
       { section: 'Real-time Upserts', content: 'HNSW does not support efficient incremental deletes — deleting from the graph requires re-linking neighbours. Solution: mark deleted vectors with a tombstone (skip during traversal). Periodically compact the index offline to physically remove tombstones. New vectors are inserted into the graph immediately (HNSW supports online inserts in O(log N)). To handle the delay between upsert and index refresh on replicas, the client SDK can fall back to a brute-force scan of a small "dirty buffer" of recent upserts not yet in the main index.' },
     ],
-    diagram: `graph TB
+    diagram: `graph LR
     subgraph Clients
+        direction TB
         RAGApp[RAG Application]
         ImageSearch[Image Similarity App]
         RecSys[Recommendation System]
         AdminUI[Admin UI]
     end
     subgraph Edge
+        direction TB
         LB[Load Balancer]
     end
     subgraph Gateway
+        direction TB
         APIGW[Vector DB API]
         Auth[Auth and Namespace ACL]
     end
     subgraph Services
+        direction TB
         Coordinator[Query Coordinator]
         UpsertSvc[Upsert Service]
         DeleteSvc[Delete Service]
@@ -3631,6 +3928,7 @@ export const systemDesignProblems = [
         Quantizer[PQ and Scalar Quantizer]
     end
     subgraph Async
+        direction TB
         BuilderJob[HNSW Index Builder]
         CompactJob[Tombstone Compaction]
         TrainingJob[PQ Codebook Trainer]
@@ -3638,6 +3936,7 @@ export const systemDesignProblems = [
         DirtyBufferGC[Dirty Buffer Flush]
     end
     subgraph Storage
+        direction TB
         VectorsRaw[(Raw float32 Vectors)]
         QuantVectors[(Quantized int8 Vectors)]
         HNSWGraph[(HNSW Graph Edges)]
@@ -3647,6 +3946,7 @@ export const systemDesignProblems = [
         NamespaceMeta[(Namespace Registry)]
     end
     subgraph Analytics
+        direction TB
         EventBus[Query Telemetry]
         Metrics[Recall and Latency Dashboards]
     end
@@ -3691,6 +3991,8 @@ export const systemDesignProblems = [
 
     APIGW --> NamespaceMeta
     Coordinator --> EventBus --> Metrics
+
+    RAGApp ~~~ LB ~~~ APIGW ~~~ Coordinator ~~~ BuilderJob ~~~ VectorsRaw ~~~ EventBus
 
     classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
     classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
