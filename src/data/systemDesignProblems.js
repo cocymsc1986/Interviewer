@@ -19,15 +19,79 @@ export const systemDesignProblems = [
       { section: 'Caching', content: 'Redis cache with LRU eviction sits in front of the DB for reads. Cache key = short_code, value = long_url. Cache hit ratio >80% given Zipf distribution of access.' },
       { section: 'Redirect Strategy', content: '301 (permanent) allows CDN and browser caching but loses click analytics. 302 (temporary) hits the origin every time but enables analytics. Use 302 for analytics; 301 for pure perf.' },
     ],
-    diagram: `graph LR
-    Client -->|POST /shorten| LB[Load Balancer]
-    LB --> API[API Servers]
-    API -->|write| DB[(PostgreSQL)]
-    API -->|read| Cache[(Redis)]
-    Cache -->|miss| DB
-    Client2[Client] -->|GET shortcode| CDN
-    CDN -->|miss| LB2[Load Balancer]
-    LB2 --> API`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web App]
+        Mobile[Mobile App]
+        Bot[Bot or API Caller]
+    end
+    subgraph Edge
+        CDN[CDN Edge Cache]
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth Service]
+        RL[Rate Limiter]
+    end
+    subgraph Services
+        Shorten[Shorten Service]
+        Redirect[Redirect Service]
+        Custom[Custom Alias Service]
+        Analytics[Click Analytics Svc]
+        Expire[Expiry Service]
+        UserSvc[User Account Svc]
+    end
+    subgraph Async
+        ClickQ[Click Event Queue]
+        ClickW[Click Aggregator]
+        ExpireJob[TTL Sweeper Job]
+    end
+    subgraph Storage
+        IDGen[(ID Generator Base62)]
+        URLDB[(URL Store PostgreSQL)]
+        Cache[(Redis Hot URLs)]
+        UserDB[(User DB)]
+        ClickDB[(Click Counts DB)]
+    end
+    subgraph Analytics2 [Analytics]
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+    end
+
+    Web -->|POST shorten| APIGW
+    Mobile -->|POST shorten| APIGW
+    APIGW --> Auth
+    APIGW --> RL
+    APIGW --> Shorten
+    Shorten --> IDGen
+    Shorten --> URLDB
+    Shorten -->|custom alias| Custom --> URLDB
+
+    Bot -->|GET shortcode| CDN
+    CDN -->|cache miss| LB --> APIGW
+    APIGW --> Redirect
+    Redirect --> Cache
+    Cache -->|miss| URLDB
+    Redirect -->|click event| ClickQ --> ClickW --> ClickDB
+    Redirect --> EventBus
+
+    Web -->|view stats| APIGW --> Analytics --> ClickDB
+    Web -->|delete URL| APIGW --> Shorten
+    APIGW --> UserSvc --> UserDB
+
+    ExpireJob --> URLDB
+    ExpireJob --> Cache
+    EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class IDGen,URLDB,Cache,UserDB,ClickDB storage
+    class ClickQ,ClickW,ExpireJob async
+    class CDN,LB edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: '301 vs 302 redirect', rationale: '301 allows browser caching for performance; 302 enables server-side analytics. Choose based on whether click tracking is needed.' },
       { decision: 'Base62 ID vs MD5 hash', rationale: 'Auto-increment Base62 has zero collision risk and shorter codes. MD5 requires collision checking but allows user-independent generation.' },
@@ -162,16 +226,91 @@ export const systemDesignProblems = [
       { section: 'Social Graph', content: 'Store follower/following relationships in a dedicated graph store or a separate relational table follows(follower_id, followee_id). Indexed on both columns.' },
       { section: 'Post Metadata', content: 'Store in Cassandra: post_id, user_id, s3_url, caption, created_at, like_count, comment_count. Like counts use Redis counters flushed to DB periodically.' },
     ],
-    diagram: `graph LR
-    Client -->|presigned URL| API[API Gateway]
-    Client -->|upload| S3[(S3 Storage)]
-    S3 -->|event| Queue[SQS Queue]
-    Queue --> Processor[Image Processor]
-    Processor --> S3
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web App]
+        Mobile[Mobile App]
+    end
+    subgraph Edge
+        CDN[CloudFront CDN]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth Service]
+    end
+    subgraph Services
+        UploadSvc[Upload Service]
+        FeedSvc[Feed Service]
+        PostSvc[Post Metadata Svc]
+        FollowSvc[Follow Graph Svc]
+        LikeSvc[Like Service]
+        CommentSvc[Comment Service]
+        ProfileSvc[Profile Service]
+        NotifSvc[Notification Svc]
+        SearchSvc[Search Service]
+    end
+    subgraph Async
+        SQS[SQS Queue]
+        ImgProc[Image Processor]
+        VidProc[Video Transcoder]
+        FanoutW[Feed Fan-out Worker]
+        Indexer[Search Indexer]
+        Counter[Like Counter Flusher]
+    end
+    subgraph Storage
+        S3[(S3 Media)]
+        PostDB[(Posts Cassandra)]
+        FeedCache[(Feed Cache Redis)]
+        GraphDB[(Follow Graph DB)]
+        LikeRedis[(Like Counters Redis)]
+        CommentDB[(Comments DB)]
+        UserDB[(User DB)]
+        ES[(Elasticsearch)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Events]
+        Lake[(Data Lake)]
+    end
+
+    Mobile -->|presigned URL request| APIGW --> Auth
+    APIGW --> UploadSvc
+    UploadSvc -->|presigned PUT| Mobile
+    Mobile -->|direct upload| S3
+    S3 -->|object event| SQS
+    SQS --> ImgProc --> S3
+    SQS --> VidProc --> S3
+    ImgProc --> PostSvc --> PostDB
+    PostSvc -->|fan-out| FanoutW
+    FanoutW --> FeedCache
+    FanoutW -->|celebrity skip| PostDB
+
+    Mobile -->|GET feed| APIGW --> FeedSvc
+    FeedSvc --> FeedCache
+    FeedSvc -->|celebrity merge| PostDB
+    Mobile -->|view media| CDN
     CDN -->|origin| S3
-    Client -->|GET feed| FeedSvc[Feed Service]
-    FeedSvc --> Redis[(Redis Cache)]
-    FeedSvc --> Cassandra[(Cassandra)]`,
+
+    Web -->|like| APIGW --> LikeSvc --> LikeRedis
+    LikeRedis --> Counter --> PostDB
+    Web -->|comment| APIGW --> CommentSvc --> CommentDB
+
+    Web -->|follow user| APIGW --> FollowSvc --> GraphDB
+    FollowSvc --> NotifSvc --> Mobile
+    APIGW --> ProfileSvc --> UserDB
+    Web -->|search| APIGW --> SearchSvc --> ES
+
+    PostSvc --> EventBus
+    EventBus --> Indexer --> ES
+    EventBus --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class S3,PostDB,FeedCache,GraphDB,LikeRedis,CommentDB,UserDB,ES storage
+    class SQS,ImgProc,VidProc,FanoutW,Indexer,Counter async
+    class CDN edge
+    class EventBus,Lake analytics`,
     tradeoffs: [
       { decision: 'Direct S3 upload vs proxy through API', rationale: 'Direct upload via presigned URL offloads bandwidth from API servers and is faster for clients. Trade-off: less control over validation mid-upload.' },
     ],
@@ -197,13 +336,77 @@ export const systemDesignProblems = [
       { section: 'Distributed Coordination', content: 'Use Redis as the shared state store across all API servers. Redis INCR is atomic. For high throughput, use local in-process counters with periodic sync to Redis (eventual consistency).' },
       { section: 'Response Headers', content: 'Always return X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset in response headers so clients can self-throttle.' },
     ],
-    diagram: `graph LR
-    Client -->|request| API[API Server]
-    API -->|check limit| RL[Rate Limiter Middleware]
-    RL -->|INCR + TTL| Redis[(Redis Cluster)]
-    Redis -->|count| RL
-    RL -->|allow| Handler[Request Handler]
-    RL -->|deny| Response[429 Too Many Requests]`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web Client]
+        Mobile[Mobile Client]
+        API3rd[Third Party API Caller]
+    end
+    subgraph Edge
+        LB[Load Balancer]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Middleware[Rate Limit Middleware]
+        AuthSvc[Auth Service]
+    end
+    subgraph Services
+        TokenBucket[Token Bucket Algo]
+        SlidingLog[Sliding Window Log Algo]
+        FixedWin[Fixed Window Counter Algo]
+        ConfigSvc[Limit Config Service]
+        Handler[Request Handler]
+        Deny[429 Response Builder]
+        Headers[Rate Limit Header Injector]
+    end
+    subgraph Async
+        SyncJob[Local to Central Sync Job]
+        LogShipper[Decision Log Shipper]
+    end
+    subgraph Storage
+        RedisCluster[(Redis Cluster Shared State)]
+        LocalCache[(Local In-Process Counter)]
+        ConfigDB[(Limit Config DB)]
+    end
+    subgraph Analytics
+        Kafka[Kafka Decision Events]
+        Lake[(Data Lake)]
+    end
+
+    Web -->|request| LB --> APIGW
+    Mobile -->|request| LB
+    API3rd -->|request| LB
+    APIGW --> AuthSvc
+    APIGW --> Middleware
+    Middleware --> ConfigSvc --> ConfigDB
+
+    Middleware -->|per user burst| TokenBucket
+    Middleware -->|accurate window| SlidingLog
+    Middleware -->|simple counter| FixedWin
+    TokenBucket -->|INCR and TTL| RedisCluster
+    SlidingLog -->|ZADD ZREMRANGEBYSCORE| RedisCluster
+    FixedWin --> RedisCluster
+    TokenBucket --> LocalCache
+    LocalCache --> SyncJob --> RedisCluster
+
+    Middleware -->|allow| Handler
+    Middleware -->|deny| Deny
+    Handler --> Headers
+    Deny --> Headers
+    Headers --> Web
+    Headers --> Mobile
+    Headers --> API3rd
+
+    Middleware --> Kafka --> LogShipper --> Lake
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class RedisCluster,LocalCache,ConfigDB storage
+    class SyncJob,LogShipper async
+    class LB edge
+    class Kafka,Lake analytics`,
     tradeoffs: [
       { decision: 'Token bucket vs fixed window', rationale: 'Token bucket handles bursts gracefully and is more user-friendly. Fixed window is simpler but allows 2× burst at window edges.' },
       { decision: 'Centralized Redis vs local counters', rationale: 'Centralized Redis is accurate but adds latency. Local counters are faster but may allow slight over-limit under high concurrency.' },
@@ -230,15 +433,86 @@ export const systemDesignProblems = [
       { section: 'Load Balancing', content: 'Round-robin or least-connections across healthy instances. Health checks run every 5s. Unhealthy instances removed from rotation immediately.' },
       { section: 'Observability', content: 'Every request logs: latency, status code, client_id, route. Emit to a centralized logging pipeline (Kafka → Elasticsearch). Prometheus metrics scraped per gateway instance.' },
     ],
-    diagram: `graph LR
-    Client --> GW[API Gateway Cluster]
-    GW -->|auth check| Auth[Auth Service]
-    GW -->|rate limit| Redis[(Redis)]
-    GW -->|route| SvcA[Service A]
-    GW -->|route| SvcB[Service B]
-    GW -->|route| SvcC[Service C]
-    GW -->|logs| Kafka[Kafka]
-    Kafka --> ELK[Elasticsearch]`,
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web App]
+        Mobile[Mobile App]
+        Partner[Partner Service]
+    end
+    subgraph Edge
+        TLS[SSL TLS Termination]
+        LB[Global Load Balancer]
+    end
+    subgraph Gateway [Gateway Pipeline]
+        GW[API Gateway Cluster]
+        AuthMW[JWT and API Key Auth]
+        RLMW[Rate Limiter Middleware]
+        Router[Service Router]
+        LBMW[Per-Service Load Balancer]
+        TransformMW[Req and Resp Transformer]
+    end
+    subgraph Services
+        AuthSvc[Auth Service]
+        SvcA[Service A]
+        SvcB[Service B]
+        SvcC[Service C]
+        Health[Health Check Service]
+    end
+    subgraph Async
+        LogShipper[Log Shipper]
+        MetricsAgg[Metrics Aggregator]
+    end
+    subgraph Storage
+        Registry[(Service Registry Consul)]
+        RLRedis[(Rate Limit Redis)]
+        KeyCache[(JWT Public Key Cache)]
+        ConfigDB[(Routing Config)]
+    end
+    subgraph Analytics
+        Kafka[Kafka Access Logs]
+        ELK[(Elasticsearch ELK)]
+        Prom[(Prometheus Metrics)]
+        Grafana[Grafana Dashboards]
+    end
+
+    Web --> TLS --> LB --> GW
+    Mobile --> TLS
+    Partner --> TLS
+
+    GW --> AuthMW
+    AuthMW --> AuthSvc
+    AuthMW --> KeyCache
+    GW --> RLMW --> RLRedis
+    GW --> Router
+    Router --> Registry
+    Router --> ConfigDB
+    Router --> LBMW
+    LBMW --> SvcA
+    LBMW --> SvcB
+    LBMW --> SvcC
+    Health -->|active probe| SvcA
+    Health -->|active probe| SvcB
+    Health -->|active probe| SvcC
+    Health --> Registry
+
+    GW --> TransformMW
+    SvcA --> TransformMW
+    SvcB --> TransformMW
+    SvcC --> TransformMW
+    TransformMW --> Web
+
+    GW -->|access logs| Kafka --> LogShipper --> ELK
+    GW -->|metrics scrape| Prom --> Grafana
+    GW --> MetricsAgg --> Prom
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class Registry,RLRedis,KeyCache,ConfigDB storage
+    class LogShipper,MetricsAgg async
+    class TLS,LB edge
+    class Kafka,ELK,Prom,Grafana analytics`,
     tradeoffs: [
       { decision: 'Gateway validates JWT vs dedicated auth sidecar', rationale: 'In-gateway validation is faster (no network hop) but ties auth logic to the gateway. Sidecar keeps separation of concerns but adds latency.' },
     ],
