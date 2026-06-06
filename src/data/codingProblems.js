@@ -114,7 +114,7 @@ export const codingProblems = [
     approach: [
       { step: 1, title: 'Create a map keyed by sorted string', detail: 'For each string, sort its characters to produce a canonical key that all anagrams share.' },
       { step: 2, title: 'Group by key', detail: 'Append each original string to the list at its canonical key in the map.' },
-      { step: 3, title: 'Return values', detail: 'Return all groups (the map\'s values) as the result.' },
+      { step: 3, title: 'Return values', detail: 'Return all groups (the map\'s values) as the result. Alternative: use a 26-element character frequency array as the key instead of sorting — reduces time to O(n × k) instead of O(n × k log k).' },
     ],
     timeComplexity: 'O(n * k log k) where k is max string length',
     spaceComplexity: 'O(n * k)',
@@ -288,7 +288,7 @@ export const codingProblems = [
     slug: 'best-time-to-buy-sell-stock',
     title: 'Best Time to Buy and Sell Stock',
     difficulty: 'Easy',
-    category: 'Sliding Window',
+    category: 'Arrays & Hashing',
     tags: ['array', 'greedy'],
     description: `You are given an array \`prices\` where \`prices[i]\` is the price of a stock on the \`i\`th day. You want to maximize your profit by choosing a single day to buy and a different day in the future to sell. Return the maximum profit you can achieve from this transaction. If you cannot achieve any profit, return \`0\`.`,
     examples: [
@@ -529,9 +529,9 @@ export const codingProblems = [
     ],
     constraints: ['n == nums.length', '1 <= n <= 5000', 'All values are unique'],
     approach: [
-      { step: 1, title: 'Identify which half is sorted', detail: 'If nums[mid] >= nums[left], the left half is sorted and the minimum is in the right half.' },
-      { step: 2, title: 'Binary search on the unsorted half', detail: 'Move left to mid + 1 if the left half is sorted (minimum must be in right half). Otherwise, move right to mid.' },
-      { step: 3, title: 'Track the result', detail: 'Track the minimum of nums[mid] throughout the loop. When left > right, the answer is found.' },
+      { step: 1, title: 'Compare mid with right boundary', detail: 'If nums[mid] > nums[right], the pivot (minimum) lies in the right half — the left half is sorted and does not contain the minimum.' },
+      { step: 2, title: 'Narrow the search space', detail: 'When nums[mid] > nums[right], move left = mid + 1 (minimum is to the right of mid). Otherwise, the minimum is at mid or to the left — move right = mid (do not discard mid).' },
+      { step: 3, title: 'Converge to the minimum', detail: 'When left === right, nums[left] is the minimum. The loop invariant ensures the minimum is always within [left, right].' },
     ],
     timeComplexity: 'O(log n)',
     spaceComplexity: 'O(1)',
@@ -866,11 +866,12 @@ export const codingProblems = [
   if (!root) return [];
   const result = [];
   const queue = [root];
-  while (queue.length) {
-    const levelSize = queue.length;
+  let head = 0; // index pointer avoids O(n) Array.shift()
+  while (head < queue.length) {
+    const levelSize = queue.length - head;
     const level = [];
     for (let i = 0; i < levelSize; i++) {
-      const node = queue.shift();
+      const node = queue[head++];
       level.push(node.val);
       if (node.left) queue.push(node.left);
       if (node.right) queue.push(node.right);
@@ -1064,7 +1065,7 @@ export const codingProblems = [
     constraints: ['1 <= n <= 45'],
     approach: [
       { step: 1, title: 'Recognize the Fibonacci pattern', detail: 'The number of ways to reach step n equals ways(n-1) + ways(n-2), since you can arrive from step n-1 (1 step) or step n-2 (2 steps).' },
-      { step: 2, title: 'Iterative bottom-up DP', detail: 'Initialize one = 1 and two = 1 (base cases). Iterate from step 3 to n, computing the next value as one + two, then slide the window.' },
+      { step: 2, title: 'Iterative bottom-up DP', detail: 'Initialize one = 1 and two = 1 (base cases). Iterate from step 3 to n, computing the next value as one + two, then slide the window. (The intuitive first approach is top-down memoization: cache(n) = cache(n-1) + cache(n-2), same O(n) time but O(n) space for the call stack.)' },
       { step: 3, title: 'Return one', detail: 'After the loop, one holds the answer for n steps.' },
     ],
     timeComplexity: 'O(n)',
@@ -1083,12 +1084,184 @@ export const codingProblems = [
     },
   },
   {
+    id: 31,
+    slug: 'combination-sum',
+    title: 'Combination Sum',
+    difficulty: 'Medium',
+    category: 'Backtracking',
+    tags: ['backtracking', 'recursion', 'array'],
+    description: `Given an array of distinct integers \`candidates\` and a target integer \`target\`, return a list of all unique combinations of candidates where the chosen numbers sum to \`target\`. The same number may be chosen from candidates an unlimited number of times. You may return the combinations in any order.`,
+    examples: [
+      { input: 'candidates = [2,3,6,7], target = 7', output: '[[2,2,3],[7]]', explanation: '2+2+3=7 and 7=7 are the two valid combinations.' },
+      { input: 'candidates = [2,3,5], target = 8', output: '[[2,2,2,2],[2,3,3],[3,5]]', explanation: 'Three combinations that sum to 8.' },
+    ],
+    constraints: ['1 <= candidates.length <= 30', '2 <= candidates[i] <= 40', 'All elements are distinct', '1 <= target <= 40'],
+    approach: [
+      { step: 1, title: 'Define the backtracking function', detail: 'Recurse with parameters: current index, remaining target, and current path. At each step, try including candidates[i] (since elements can reuse, stay at i rather than i+1).' },
+      { step: 2, title: 'Base cases', detail: 'If remaining === 0, the current path is a valid combination — push a copy to results. If remaining < 0 or i >= candidates.length, backtrack.' },
+      { step: 3, title: 'Prune and recurse', detail: 'Sort candidates first (optional but enables early termination: if candidates[i] > remaining, all future candidates are also too large — break). After recursing, pop the last element to restore the path (backtrack).' },
+    ],
+    timeComplexity: 'O(n^(T/M)) where T is target, M is min candidate value',
+    spaceComplexity: 'O(T/M) recursion depth',
+    solution: {
+      language: 'javascript',
+      code: `function combinationSum(candidates, target) {
+  candidates.sort((a, b) => a - b);
+  const result = [];
+
+  function backtrack(start, remaining, path) {
+    if (remaining === 0) {
+      result.push([...path]);
+      return;
+    }
+    for (let i = start; i < candidates.length; i++) {
+      if (candidates[i] > remaining) break; // pruning
+      path.push(candidates[i]);
+      backtrack(i, remaining - candidates[i], path); // i, not i+1 (allow reuse)
+      path.pop();
+    }
+  }
+
+  backtrack(0, target, []);
+  return result;
+}`,
+    },
+  },
+  {
+    id: 32,
+    slug: 'permutations',
+    title: 'Permutations',
+    difficulty: 'Medium',
+    category: 'Backtracking',
+    tags: ['backtracking', 'recursion', 'array'],
+    description: `Given an array \`nums\` of distinct integers, return all possible permutations. You can return the answer in any order.`,
+    examples: [
+      { input: 'nums = [1,2,3]', output: '[[1,2,3],[1,3,2],[2,1,3],[2,3,1],[3,1,2],[3,2,1]]', explanation: 'All 3! = 6 permutations of [1,2,3].' },
+      { input: 'nums = [0,1]', output: '[[0,1],[1,0]]', explanation: 'Two permutations of two elements.' },
+    ],
+    constraints: ['1 <= nums.length <= 6', '-10 <= nums[i] <= 10', 'All integers are unique'],
+    approach: [
+      { step: 1, title: 'Backtrack with a "used" set', detail: 'Maintain a boolean array of which indices have been included in the current path. At each recursion level, try every unused index.' },
+      { step: 2, title: 'Build the permutation', detail: 'Add nums[i] to the path, mark i as used, recurse. On return, remove nums[i] and mark i as unused (backtrack).' },
+      { step: 3, title: 'Base case', detail: 'When path.length === nums.length, all elements are placed — push a copy of path to results.' },
+    ],
+    timeComplexity: 'O(n × n!) — n! permutations, each takes O(n) to copy',
+    spaceComplexity: 'O(n) recursion depth',
+    solution: {
+      language: 'javascript',
+      code: `function permute(nums) {
+  const result = [];
+  const used = new Array(nums.length).fill(false);
+
+  function backtrack(path) {
+    if (path.length === nums.length) {
+      result.push([...path]);
+      return;
+    }
+    for (let i = 0; i < nums.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      path.push(nums[i]);
+      backtrack(path);
+      path.pop();
+      used[i] = false;
+    }
+  }
+
+  backtrack([]);
+  return result;
+}`,
+    },
+  },
+  {
+    id: 33,
+    slug: 'k-closest-points-to-origin',
+    title: 'K Closest Points to Origin',
+    difficulty: 'Medium',
+    category: 'Heap / Priority Queue',
+    tags: ['heap', 'priority-queue', 'sorting', 'array'],
+    description: `Given an array of points where \`points[i] = [xi, yi]\` represents a point on the X-Y plane and an integer \`k\`, return the \`k\` closest points to the origin \`(0, 0)\`. The distance is the Euclidean distance. You may return the answer in any order.`,
+    examples: [
+      { input: 'points = [[1,3],[-2,2]], k = 1', output: '[[-2,2]]', explanation: 'Distance of [1,3] = √10. Distance of [-2,2] = √8. [-2,2] is closer.' },
+      { input: 'points = [[3,3],[5,-1],[-2,4]], k = 2', output: '[[3,3],[-2,4]]', explanation: 'Two closest points to origin.' },
+    ],
+    constraints: ['1 <= k <= points.length <= 10^4', '-10^4 <= xi, yi <= 10^4'],
+    approach: [
+      { step: 1, title: 'Use a max-heap of size k', detail: 'Maintain a max-heap keyed by squared distance (√ not needed for comparison). Keep at most k elements — if the heap grows beyond k, remove the farthest point.' },
+      { step: 2, title: 'Process all points', detail: 'For each point, compute squaredDist = x² + y² and push to the heap. If heap size exceeds k, pop the largest. This ensures the heap always holds the k closest points seen so far.' },
+      { step: 3, title: 'Return heap contents', detail: 'After all points are processed, the heap contains exactly the k closest points. Note: JavaScript has no built-in heap — use a sorted array or implement a min-heap by negating distances.' },
+    ],
+    timeComplexity: 'O(n log k)',
+    spaceComplexity: 'O(k)',
+    solution: {
+      language: 'javascript',
+      code: `function kClosest(points, k) {
+  // Sort approach: O(n log n) — simpler in JS without a built-in heap
+  points.sort((a, b) => (a[0] ** 2 + a[1] ** 2) - (b[0] ** 2 + b[1] ** 2));
+  return points.slice(0, k);
+}
+
+// Optimal O(n log k) approach requires a max-heap.
+// In an interview, implement a simple binary heap or use the sort above
+// and note that a heap reduces time from O(n log n) to O(n log k).`,
+    },
+  },
+  {
+    id: 34,
+    slug: 'merge-k-sorted-lists',
+    title: 'Merge K Sorted Lists',
+    difficulty: 'Hard',
+    category: 'Heap / Priority Queue',
+    tags: ['heap', 'priority-queue', 'linked-list', 'divide-and-conquer'],
+    description: `You are given an array of \`k\` linked-lists, each sorted in ascending order. Merge all linked lists into one sorted linked list and return it.`,
+    examples: [
+      { input: 'lists = [[1,4,5],[1,3,4],[2,6]]', output: '[1,1,2,3,4,4,5,6]', explanation: 'All three lists merged into one sorted list.' },
+      { input: 'lists = []', output: '[]', explanation: 'Empty input returns null.' },
+    ],
+    constraints: ['0 <= k <= 10^4', '0 <= lists[i].length <= 500', '-10^4 <= lists[i][j] <= 10^4'],
+    approach: [
+      { step: 1, title: 'Use a min-heap to track k list heads', detail: 'Push the head node of every non-empty list into a min-heap keyed by node value. The heap always gives the globally smallest unprocessed node in O(log k) time.' },
+      { step: 2, title: 'Extract and rebuild', detail: 'Pop the minimum node from the heap, append it to the result list. If the popped node has a next, push next into the heap. Repeat until the heap is empty.' },
+      { step: 3, title: 'Alternative: divide and conquer', detail: 'Pair up lists and merge each pair using the two-sorted-lists merge (problem #18). Repeat on the k/2 merged results. This gives O(n log k) time with O(1) extra space (excluding output). Same complexity as the heap, but avoids implementing a heap.' },
+    ],
+    timeComplexity: 'O(n log k) where n is total nodes across all lists',
+    spaceComplexity: 'O(k) for the heap',
+    solution: {
+      language: 'javascript',
+      code: `// Divide and conquer approach — no heap needed
+function mergeKLists(lists) {
+  if (!lists.length) return null;
+
+  function mergeTwoLists(l1, l2) {
+    const dummy = { next: null };
+    let curr = dummy;
+    while (l1 && l2) {
+      if (l1.val <= l2.val) { curr.next = l1; l1 = l1.next; }
+      else { curr.next = l2; l2 = l2.next; }
+      curr = curr.next;
+    }
+    curr.next = l1 ?? l2;
+    return dummy.next;
+  }
+
+  while (lists.length > 1) {
+    const merged = [];
+    for (let i = 0; i < lists.length; i += 2) {
+      merged.push(mergeTwoLists(lists[i], lists[i + 1] ?? null));
+    }
+    lists = merged;
+  }
+  return lists[0];
+}`,
+    },
+  },
+  {
     id: 30,
     slug: 'coin-change',
     title: 'Coin Change',
     difficulty: 'Medium',
     category: 'Dynamic Programming',
-    tags: ['dp', 'bfs', 'bottom-up'],
+    tags: ['dp', 'bottom-up'],
     description: `You are given an integer array \`coins\` representing coins of different denominations and an integer \`amount\` representing a total amount of money. Return the fewest number of coins needed to make up that amount. If no combination can make the amount, return \`-1\`.`,
     examples: [
       { input: 'coins = [1,5,10,25], amount = 41', output: '4', explanation: '25 + 10 + 5 + 1 = 41 with 4 coins.' },
@@ -1098,7 +1271,7 @@ export const codingProblems = [
     approach: [
       { step: 1, title: 'Build a DP array', detail: 'Create dp[0..amount] initialized to Infinity. Set dp[0] = 0 (zero coins needed to make amount 0).' },
       { step: 2, title: 'Fill the DP table', detail: 'For each amount from 1 to amount, try each coin. If coin <= current amount, dp[i] = min(dp[i], dp[i - coin] + 1).' },
-      { step: 3, title: 'Return result', detail: 'dp[amount] holds the answer. Return -1 if it is still Infinity.' },
+      { step: 3, title: 'Return result', detail: 'dp[amount] holds the answer. Return -1 if it is still Infinity. Alternative: BFS treats each amount as a node and each coin as an edge — finds the minimum "hops" (coins), but bottom-up DP is more memory-efficient.' },
     ],
     timeComplexity: 'O(amount × coins.length)',
     spaceComplexity: 'O(amount)',
