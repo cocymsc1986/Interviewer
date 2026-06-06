@@ -48,11 +48,12 @@ export const systemDesignProblems = [
     },
     capacityEstimates: `Tweets: 600M/day ≈ 7,000 writes/sec\nTimeline reads: 70,000 reads/sec\nStorage: 600M tweets × 280B text ≈ 170 GB/day\nMedia: separate blob storage, linked by URL`,
     solutionBreakdown: [
-      { section: 'Tweet Storage', content: 'Store tweets in a distributed DB (Cassandra) partitioned by user_id. Each row: tweet_id (Snowflake ID), user_id, content, created_at, media_urls.' },
+      { section: 'Tweet Storage', content: 'Store tweets in a distributed DB (Cassandra) partitioned by user_id. Each row: tweet_id (Snowflake ID), user_id, content, created_at, media_urls. Snowflake IDs are 64-bit integers composed of a millisecond timestamp, datacenter ID, and sequence number — they are globally unique and time-sortable, which means range queries by recency are efficient without a separate timestamp index. (See the Distributed ID Generator design for full details.)' },
       { section: 'Timeline Generation — Fan-out on Write', content: 'When a user tweets, push the tweet_id into a Redis sorted set (timeline cache) for each follower. Score = timestamp. Works well for non-celebrity users.' },
       { section: 'Celebrity Problem', content: 'For users with >1M followers, fan-out on write is too expensive (writing to 1M sets per tweet). Instead use fan-out on read: merge celebrity tweets at read time with the pre-built feed.' },
       { section: 'Timeline Read Path', content: 'Fetch pre-built timeline from Redis (ZREVRANGE by score). Merge in latest tweets from any celebrities the user follows. Hydrate tweet_ids into full tweet objects via a Tweet Service.' },
       { section: 'Media Handling', content: 'Images/videos go to blob storage (S3). URLs stored with tweet. CDN serves media. Thumbnail generation is async via a queue.' },
+      { section: 'Observability', content: 'Key metrics: tweet write latency P99, timeline read latency P99, fan-out queue depth (alert if >1M backlog), cache hit ratio (alert if <70%). Distributed tracing (Jaeger/Zipkin) on the tweet-write and feed-read paths. Dashboard: tweets/sec, active WebSocket connections, Redis memory utilization.' },
     ],
     diagram: `graph TD
     User -->|POST tweet| API[API Gateway]
@@ -190,6 +191,7 @@ export const systemDesignProblems = [
       { section: 'Adaptive Bitrate Streaming', content: 'Client player downloads the manifest and starts with a low resolution. Based on measured bandwidth, it dynamically selects higher or lower quality segment files. Eliminates buffering on poor connections.' },
       { section: 'CDN Distribution', content: 'Segment files pushed/cached at CDN edge nodes globally. First viewer in a region triggers a cache fill. Subsequent viewers served from edge with <5ms latency.' },
       { section: 'Metadata & Search', content: 'Video metadata (title, description, tags, view count) stored in Cassandra. Full-text search via Elasticsearch. View counts use Redis counters flushed to DB asynchronously.' },
+      { section: 'Observability', content: 'Key metrics: transcoding job queue depth and P99 processing time, CDN cache hit ratio per region (alert if <85%), playback error rate, buffering ratio per bitrate tier. Alerts: transcoding worker failures, CDN origin error spikes. Use a metrics pipeline (Prometheus → Grafana) and structured logs (ELK stack) for upload and playback events.' },
     ],
     diagram: `graph TD
     Uploader -->|video file| Edge[Edge Upload Server]
@@ -290,7 +292,7 @@ export const systemDesignProblems = [
       { section: 'Consistent Hashing for Partitioning', content: 'Map key space onto a ring. Each node is assigned multiple virtual nodes on the ring (150+ per physical node). A key is owned by the first N clockwise nodes for replication factor N. Adding/removing nodes only remaps ~1/N of keys.' },
       { section: 'Replication & Quorum', content: 'Each key replicated to N nodes (typically N=3). Write quorum W=2, Read quorum R=2. W + R > N ensures at least one node has the latest write on every read (sloppy quorum). Tunable for availability vs consistency.' },
       { section: 'Storage Engine — LSM Tree', content: 'Writes go to an in-memory MemTable and append-only WAL (Write-Ahead Log). MemTable flushed to SSTable files on disk when full. SSTables compacted in background (merge sort). Provides fast writes; reads may check multiple SSTables (Bloom filters reduce I/O).' },
-      { section: 'Conflict Resolution', content: 'Use vector clocks to detect concurrent writes. On conflict, use last-write-wins (timestamp) or return both versions to the client for application-level resolution.' },
+      { section: 'Conflict Resolution', content: 'Use vector clocks to detect concurrent writes. A vector clock is a per-node counter map (e.g., {A:2, B:1}) stored with each value. When node A writes, it increments its own counter. If two versions have incomparable clocks (neither dominates the other), they were written concurrently — a true conflict. On conflict, use last-write-wins (timestamp) or return both versions to the client for application-level resolution (DynamoDB shopping-cart pattern).' },
       { section: 'Failure Handling', content: 'Hinted handoff: if a node is temporarily down, another node stores writes with a hint to forward later. Anti-entropy (Merkle tree comparison) detects and repairs diverged replicas in the background.' },
     ],
     diagram: `graph TD
@@ -523,6 +525,7 @@ export const systemDesignProblems = [
       { section: 'Trip State Machine', content: 'Trip states: REQUESTED → ACCEPTED → DRIVER_ARRIVING → IN_PROGRESS → COMPLETED. State stored in a fast KV store (Redis) during the trip, then persisted to Cassandra on completion.' },
       { section: 'Surge Pricing', content: 'Aggregate supply (available drivers) and demand (open requests) per geo-cell (H3 hexagons) every 30s. Compute surge multiplier = demand/supply. Cap at 3×. Communicated to rider before confirmation.' },
       { section: 'Real-time Updates', content: 'Driver app and rider app maintain WebSocket connections to a gateway. During a trip, the gateway forwards driver location to the rider\'s socket. Gateway cluster uses Redis pub/sub to route messages across gateway nodes.' },
+      { section: 'Observability', content: 'Key metrics: match latency P99 (alert if >3s), location update staleness (alert if >10s gap for active driver), active WebSocket connections per gateway node, Redis GeoSet operation latency. Business metrics: match rate, cancel rate, surge multiplier per city. Dashboards split by city/region since demand is geographically localized.' },
     ],
     diagram: `graph LR
     Driver -->|GPS update/4s| LocSvc[Location Service]
@@ -589,7 +592,7 @@ export const systemDesignProblems = [
       { section: 'Stream Ingest', content: 'Streamers use OBS/streaming software to push RTMP to the nearest ingest edge server. RTMP is low-latency for upload. Ingest edge converts RTMP to HLS segments (2-second chunks) and pushes to origin.' },
       { section: 'Transcoding', content: 'Ingest edge triggers a transcoding job per stream. Transcoder workers produce 4 quality variants (160p, 360p, 720p, 1080p) simultaneously. Segments pushed to CDN origin storage immediately.' },
       { section: 'Delivery via CDN', content: 'HLS manifest (.m3u8) and segments served from CDN. First viewer in a region fetches from origin (CDN miss); subsequent viewers hit the CDN edge. Target CDN cache hit ratio >95% for popular streams.' },
-      { section: 'Latency Reduction', content: 'Standard HLS has 30s latency (15s segment size). Low-Latency HLS (LL-HLS) uses 200ms partial segments pushed to CDN. WebRTC can achieve <1s latency but doesn\'t scale to millions of viewers.' },
+      { section: 'Latency Reduction', content: 'Standard HLS has ~20–30s glass-to-glass latency because the player buffers 3 segments (each typically 6–10s) before playback begins. Low-Latency HLS (LL-HLS) uses 200ms partial segments pushed to CDN, reducing latency to ~2–3s. WebRTC can achieve <1s latency but does not scale to millions of viewers via CDN.' },
       { section: 'Live Chat', content: 'Chat messages go through a separate WebSocket-based chat service. Messages stored in Redis pub/sub and fanout to all connected viewers for that stream. Moderation bots scan messages asynchronously.' },
     ],
     diagram: `graph LR
