@@ -4,17 +4,5 @@ out/
 .env
 .env.local
 
-# Claude Code agent worktrees (temporary, must not be committed)
-.claude/
-
 # Local validation/screenshot helpers — not part of the app
-_validate-diagrams.mjs
-_screenshot.mjs
-_add-directions.mjs
-_add-tier-anchors.mjs
-_layout-swap.mjs
-_panzoom-test.mjs
-_faq-screenshot.mjs
-_merge-worktrees.mjs
-_validate-worktree.mjs
 _*.mjs
