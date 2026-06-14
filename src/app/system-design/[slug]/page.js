@@ -120,6 +120,26 @@ export default function SystemDesignDetailPage({ params }) {
             ))}
           </ul>
         </section>
+
+        {/* FAQs */}
+        {problem.faqs && problem.faqs.length > 0 && (
+          <section>
+            <h2 className="text-lg font-semibold text-white mb-4">FAQs</h2>
+            <div className="space-y-3">
+              {problem.faqs.map((f, i) => (
+                <details key={i} className="group bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                  <summary className="cursor-pointer list-none p-5 flex items-start gap-3 hover:bg-gray-900/60">
+                    <span className="text-cyan-400 font-bold text-sm mt-0.5 transition-transform group-open:rotate-90">›</span>
+                    <span className="text-gray-200 text-sm font-semibold flex-1">{f.question}</span>
+                  </summary>
+                  <div className="px-5 pb-5 pl-12 text-gray-400 text-sm leading-relaxed whitespace-pre-line border-t border-gray-800/60">
+                    <div className="pt-4">{f.answer}</div>
+                  </div>
+                </details>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

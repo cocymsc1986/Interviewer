@@ -2589,13 +2589,23 @@ export const systemDesignProblems = [
       functional: ['Process payments (card, bank transfer)', 'Transfer money between accounts', 'Refunds and chargebacks', 'Payment status tracking', 'Webhooks for payment events'],
       nonFunctional: ['Exactly-once payment processing (no double charges)', '99.99% availability', 'PCI-DSS compliance', 'Idempotent APIs', 'Full audit trail'],
     },
-    capacityEstimates: `1M transactions/day ≈ 12 txns/sec average\nPeak: 10× ≈ 120 txns/sec\nStorage: 1M txns × 1KB = 1GB/day (small, but append forever)`,
+    capacityEstimates: `1M transactions/day ≈ 12 txns/sec average\nPeak (Black Friday / launches): 50× ≈ 600 txns/sec\nStorage: ledger 1M × 400B = 400MB/day, append forever (~150GB/yr)\nFraud feature store: ~5KB per txn × 30-day window = ~150GB hot\nWebhook fan-out: ~3 outbound webhooks per txn = ~3K rps peak`,
     solutionBreakdown: [
-      { section: 'Idempotency Keys', content: 'Every payment API call includes a client-generated idempotency_key. Server stores (idempotency_key → result) in a DB table before processing. On retry, return the cached result instead of processing again. Prevents double-charges on network retries.' },
-      { section: 'Double-Entry Bookkeeping', content: 'Every payment creates two ledger entries: debit from source account, credit to destination account. Ledger table is append-only (never update rows). Balance = sum of all entries for an account. Audit-proof and tamper-evident.' },
-      { section: 'Payment State Machine', content: 'States: PENDING → PROCESSING → SUCCEEDED / FAILED / REFUNDED. State transitions stored as events. Only forward transitions allowed. Disputed payments enter DISPUTED state pending chargeback resolution.' },
-      { section: 'PSP Integration', content: 'Actual card processing delegated to a Payment Service Provider (Stripe, Adyen). System stores a PSP-provided token, not raw card numbers (PCI compliance). PSP webhooks update local payment status.' },
-      { section: 'Reconciliation', content: 'Nightly reconciliation job compares internal ledger with PSP settlement files. Any discrepancy triggers an alert. Separate settlement service handles payouts to merchants with configurable delay (e.g., T+2).' },
+      { section: 'API Design', content: 'Public surface (idempotent where it counts):\n  POST /payment_intents { amount, currency, customer_id, payment_method, capture: "automatic"|"manual" }\n  POST /payment_intents/{id}/confirm  (move PENDING → PROCESSING, run 3DS if required)\n  POST /payment_intents/{id}/capture { amount? }  (manual capture; partial amounts allowed)\n  POST /refunds { payment_intent_id, amount, reason }\n  GET  /payment_intents/{id}\n  POST /webhooks/psp  (PSP → us, signed)\n\nEvery state-changing POST requires an Idempotency-Key header. GETs do not. The two-step intent → confirm split lets the client run 3DS in the browser between the calls without the server holding open a long synchronous PSP socket.' },
+      { section: 'Idempotency Keys', content: 'Client generates a UUIDv4 per logical action ("buy this cart now"), sends it as Idempotency-Key. Server stores (key, request_hash, response, status_code, expires_at) in an idempotency table with a unique index on key.\n\nFlow on every request:\n  1. SELECT … FOR UPDATE the row for key.\n  2. If row exists and request_hash matches → replay the stored response. Done.\n  3. If row exists and request_hash differs → 409 Conflict (the client is reusing a key for a different request — almost certainly a bug).\n  4. If no row → INSERT with status=IN_PROGRESS, then process; on completion UPDATE the row with the final response.\n\nKey TTL: 24h is typical. Long enough to survive retries during outages, short enough that storage stays bounded. The key only de-dupes the API call — the deeper authorization to the PSP is also keyed (most PSPs accept an idempotency key of their own) so a retry never reaches the card network twice.' },
+      { section: 'Authorization vs Capture vs Settlement', content: 'Three distinct events that interview candidates often conflate:\n  • Authorization: ask the issuer "is this card good for $X?" Holds the funds on the cardholder side but no money has moved. Lasts 7–30 days.\n  • Capture: convert the auth into a real charge. After capture, the merchant is owed money.\n  • Settlement: the card network actually moves money from the issuer to the acquirer to the merchant\'s bank, typically T+1 or T+2.\n\nWhy separate auth and capture? E-commerce captures at ship time (you don\'t charge for what you can\'t fulfil). Hotels and car rentals pre-auth at booking, capture at checkout. Marketplaces capture only after the seller confirms. Our payment_intent has capture: automatic | manual to support both.' },
+      { section: 'Double-Entry Bookkeeping', content: 'Single source of truth for money is the ledger. Schema:\n  ledger_entries(id, txn_id, account_id, direction (DR|CR), amount, currency, posted_at, metadata_jsonb)\n\nEvery business event writes two entries that sum to zero. A $50 capture posts:\n  DR  customer_clearing_account  50.00\n  CR  merchant_payable_account   50.00\n\nA refund posts the reverse. A fee posts a third pair (DR merchant_payable, CR platform_revenue). Rules:\n  1. Rows are append-only. Never UPDATE, never DELETE. Corrections are new offsetting entries.\n  2. Balance(account) = SUM(CR) - SUM(DR), computed on read or cached in a materialized view.\n  3. Every entry has txn_id so any single business event is reversible by inserting its inverse.\n\nThis makes the system audit-proof — every cent has a trail, and discrepancies between the ledger and the PSP are caught by reconciliation.' },
+      { section: 'Payment State Machine', content: 'Allowed transitions (rejected transitions are logged as errors, not silently ignored):\n  REQUIRES_PAYMENT_METHOD → REQUIRES_CONFIRMATION → REQUIRES_ACTION (3DS challenge) → PROCESSING → SUCCEEDED\n  any → FAILED (terminal)\n  SUCCEEDED → DISPUTED → DISPUTE_LOST | DISPUTE_WON\n  SUCCEEDED → REFUNDED (partial refunds keep state SUCCEEDED, the refund itself has its own lifecycle)\n\nState lives in the transaction DB row, plus an immutable state_events table that records every transition with cause, actor, and timestamp. The events table is the truth — the state column on the row is a cached projection. Webhooks fire on every transition.' },
+      { section: 'PSP Integration and 3DS', content: 'We never touch the PAN (Primary Account Number). Flow:\n  1. Browser collects card via PSP-hosted iframe (e.g., Stripe Elements). PSP returns a single-use payment_method_token.\n  2. Server creates payment_intent against the PSP with that token + our idempotency key.\n  3. If 3D Secure / SCA is required (mandatory under PSD2 in EU above €30), PSP returns a redirect URL. Server returns it to the client; client completes the challenge with the issuer.\n  4. PSP webhooks us back on completion with a signed payload (HMAC). Verify signature, then advance the state machine.\n\nWhy 3DS matters: when the issuer approves a 3DS-authenticated payment, liability for fraud shifts from the merchant to the issuer. For high-value transactions this is the difference between eating a chargeback and not.' },
+      { section: 'Tokenization and PCI Scope Reduction', content: 'PCI-DSS classifies systems by whether they store/process/transmit cardholder data. Any system that does is "in scope" and subject to ~300 controls (annual audits, hardened networks, etc.). The goal is to keep the in-scope footprint as small as possible.\n\nStrategy: card data is captured directly by the PSP\'s JS SDK from inside an iframe served by their domain. Our backend only ever sees a token (pm_1AbCd…) which is useless outside our PSP account. Our card vault stores tokens — not PANs — so it\'s out of PCI scope for storage but still needs encryption at rest and strict access controls.\n\nFor merchants on file (subscriptions), the PSP gives us a long-lived customer_id; we keep that in our customer DB. Network tokenization (Visa Token Service) reduces churn from re-issued cards.' },
+      { section: 'Fraud and Risk Scoring', content: 'Two layers:\n  1. Rules engine — fast deterministic checks: BIN country ≠ shipping country, velocity (>5 attempts/hr from one IP), AVS mismatch, CVV failure, blocklisted device fingerprint. Runs synchronously in the auth path, <30ms.\n  2. ML model — gradient-boosted tree scoring on ~200 features (account age, device history, basket value vs customer norm, time-of-day, etc.). Trained nightly on labelled chargebacks. Scored asynchronously alongside rules, used to allow/review/block.\n\nFeature store sits in Redis for online scoring + a column store (e.g., ClickHouse) for training. The model output is one number — a risk score 0–1000 — and a policy maps thresholds to actions (allow, manual_review, 3DS_step_up, decline). Tunable per merchant.' },
+      { section: 'Webhooks and Async Status Updates', content: 'Most payment outcomes are asynchronous: the PSP webhook back to us, and we webhook to the merchant. Failure modes here cause most production incidents.\n\nOutbound webhooks to merchants:\n  • Sign every payload with HMAC-SHA256 using a per-merchant secret. Include a timestamp in the signature to prevent replay.\n  • At-least-once delivery. Merchant endpoint must be idempotent on event_id (we tell them in the docs).\n  • Retry policy: exponential backoff (10s, 1m, 10m, 1h, 6h, 24h), max 24h total, then route to dead-letter and surface in dashboard.\n  • All retries are visible in a per-merchant webhook log so they can replay manually.\n\nInbound webhooks from PSPs: same signing, plus a "do you really know what you sent?" check — for sensitive events (e.g., dispute opened) we call back to the PSP\'s GET endpoint with the event_id to confirm rather than trusting the body alone.' },
+      { section: 'Reconciliation', content: 'PSP sends a daily settlement report (CSV or API). Job runs nightly:\n  1. Pull yesterday\'s PSP report.\n  2. SELECT all ledger entries with PSP-reference for the same day.\n  3. Match by (psp_txn_id, amount, currency). Three buckets:\n     • Matched → mark reconciled=true.\n     • In ledger but not in PSP report → likely captured today, settles tomorrow. Re-check in next run. Flag if >3 days unmatched.\n     • In PSP report but not in ledger → MISSING_INGESTION. Page on-call. This means a webhook was lost and we owe a customer a status update.\n  4. Per-currency totals must match the PSP\'s payout to our bank account to the cent. Off-by-one ⇒ investigation, not auto-resolve.\n\nReconciliation is the safety net that catches webhook loss, double-postings, and PSP-side bugs.' },
+      { section: 'Refunds, Disputes, and Chargebacks', content: 'Refund (merchant-initiated): POST /refunds. Posts the inverse ledger entries, calls PSP refund API, webhooks the merchant. Full refunds can happen any time; partial refunds sum-check against the original amount in the txn row.\n\nDispute (cardholder-initiated via issuer): PSP webhook fires with dispute_opened. We freeze the merchant_payable balance by the disputed amount + dispute fee (typically $15–25). Merchant gets a deadline (usually 7–21 days) to upload evidence — order receipts, shipping proof, etc. If lost, the funds go back to the cardholder and the freeze becomes a permanent debit. If won, the freeze releases.\n\nChargeback fraud (e.g., "friendly fraud" — customer denies a real purchase) is large enough that most platforms have a dedicated dispute_evidence service to template responses for merchants.' },
+      { section: 'Settlement and Merchant Payouts', content: 'Money owed to merchants accumulates in their merchant_payable_account balance. Settlement runs on a configurable schedule (T+2 default, T+0 for some markets) and pays out via:\n  • ACH (US) — cheap, 1–3 days, supports reversal.\n  • SEPA (EU) — 1 day, no reversal once accepted.\n  • Wire — expensive, same-day, irrevocable, used for large amounts.\n\nPayouts are themselves payments — they get the same idempotency, ledger entries (DR merchant_payable, CR cash), and state machine. A failed payout (closed bank account) bounces back; the funds return to merchant_payable and an alert fires.' },
+      { section: 'Multi-currency and FX', content: 'Every ledger entry is denominated in a single currency. A USD merchant accepting EUR has at minimum three entries on a EUR sale:\n  DR  customer_clearing_eur     100.00 EUR\n  CR  fx_holding_eur            100.00 EUR\n  DR  fx_holding_usd            108.00 USD  (at locked rate)\n  CR  merchant_payable_usd      108.00 USD\n\nFX rate is locked at capture time and quoted by an FX provider (Wise, banks, etc.) with a small markup. The fx_holding accounts net to zero across all conversions at end-of-day. Multi-currency is where amateur ledgers fall apart — don\'t mix currencies in one entry.' },
+      { section: 'Failure Modes and Recovery', content: 'Some scenarios and how the design covers them:\n  • Network drops between PSP success and our DB commit: PSP retains the txn under our idempotency key; on retry we read the same result. No double-charge.\n  • Webhook lost: nightly reconciliation surfaces it; manual replay endpoint re-posts to the merchant.\n  • PSP is down: synchronous calls fail fast (3s timeout); we mark txn FAILED_RETRYABLE and queue for a background retry with circuit-breaker per PSP. Multi-PSP routing fails over to a secondary.\n  • Ledger DB primary fails over: writes pause for ~10s. Since idempotency keys are honoured, clients retry safely.\n  • Stuck PROCESSING state: a janitor job scans for txns in PROCESSING for >24h and forces a state reconciliation against the PSP.\n\nThe ledger is the recovery anchor — as long as it is intact and append-only, everything else can be rebuilt or replayed.' },
+      { section: 'Observability and Alerting', content: 'Metrics that page on-call:\n  • auth_success_rate per PSP per BIN country (a sudden drop = PSP outage or issuer blocking).\n  • webhook_retry_queue_depth (> N for X minutes = endpoint problem).\n  • reconciliation_unmatched_count (>0 for >24h).\n  • ledger_balance_drift (any non-zero net per currency at end-of-day).\n  • p99 latency on /confirm (>3s = PSP slowness).\n\nDashboards split by merchant for support. Every txn carries a correlation_id propagated to PSP calls so cross-system traces in Jaeger/Datadog can be reconstructed end-to-end. PCI scope means audit logs of every read of cardholder data; those go to an immutable WORM store separate from the application logs.' },
     ],
     diagram: `graph TB
     subgraph Clients
@@ -2695,9 +2705,30 @@ export const systemDesignProblems = [
     class WAF,LB edge
     class EventBus,Lake analytics`,
     tradeoffs: [
-      { decision: 'Synchronous PSP call vs async queue', rationale: 'Synchronous call gives the user an immediate result but ties up a thread per payment. Async queue decouples throughput but requires status polling or webhooks. Most payment UIs prefer synchronous for UX.' },
+      { decision: 'Synchronous PSP call vs async queue', rationale: 'Synchronous call gives the user an immediate result but ties up a thread per payment and couples our availability to the PSP. Async queue decouples throughput but requires status polling or webhooks. Most payment UIs prefer synchronous for UX up to a short timeout (~3s), then fall back to async with a "we will email you when complete" path.' },
+      { decision: 'Single-row balance vs computed-from-ledger', rationale: 'A balance column updated on every write is fast to read but is a hot row and gets out of sync. Computing balance by SUM over ledger entries is the source of truth but is expensive at scale. Use a materialised view refreshed by ledger writes — fast reads with a self-healing recomputation path.' },
+      { decision: 'Multi-PSP routing vs single PSP', rationale: 'Single PSP is simpler operationally but ties auth_success_rate to one provider\'s issuer relationships. Multi-PSP lets you route by BIN, country, or cost and fail over on outages, but doubles the integration surface and the reconciliation effort. Worth it past ~$100M/yr in volume.' },
+      { decision: 'Capture immediately vs at fulfilment', rationale: 'Capturing at auth time gets you money sooner and avoids expired auths, but creates customer-side refund work if the order can\'t be fulfilled and inflates dispute risk on cancelled orders. Capturing at fulfilment matches money movement to the obligation. Trade-off: complexity in the auth-hold window (you might have to re-auth if the customer takes >7 days).' },
     ],
-    keyTakeaways: ['Idempotency keys are the critical mechanism to prevent double-charges on retries', 'Double-entry bookkeeping makes the ledger append-only and audit-proof', 'Never store raw card numbers — use PSP tokenization for PCI compliance'],
+    keyTakeaways: [
+      'Idempotency keys are the single most important mechanism — they protect every retry path from network drops to PSP timeouts',
+      'Double-entry bookkeeping with an append-only ledger gives you a recovery anchor: as long as the ledger is intact, everything else is reconstructible',
+      'Authorisation, capture, and settlement are three different events with different timings; conflating them is a common interview tell',
+      'PCI scope reduction via tokenisation isn\'t optional — it saves ~80% of compliance cost and removes whole classes of breach risk',
+      'Reconciliation against PSP settlement reports is the safety net that catches lost webhooks and ledger drift before customers notice',
+    ],
+    faqs: [
+      { question: 'What is an idempotency key actually, and why must the client generate it?', answer: 'It\'s a value that uniquely identifies one logical action ("buy this cart, now"). The client must generate it because only the client knows what counts as a retry vs a new attempt. If the server generated it on first contact, the client wouldn\'t know what to send back on retry — and the request that established the key might be the one that was dropped. UUIDv4 is fine; what matters is that the same key is used for every retry of the same logical action, and a new key is used for a different action.' },
+      { question: 'When exactly does the customer\'s money move, and when does the merchant get paid?', answer: 'Three distinct moments:\n  1. Authorization (real-time): issuer puts a hold on the cardholder\'s funds. Money does not move yet. Hold expires in 7–30 days.\n  2. Capture (when merchant initiates, often at ship time): the hold becomes a real charge. Cardholder sees the line item post.\n  3. Settlement (T+1 or T+2 via the card networks): money actually arrives in the merchant\'s acquiring bank account.\n\nThe merchant\'s merchant_payable balance in our ledger is credited at capture. The actual cash payout from us to the merchant\'s bank account happens on the payout schedule (often T+2 from capture) and is itself a separate ledger entry pair.' },
+      { question: 'What happens if the network drops right after the PSP succeeds but before our DB commits?', answer: 'This is the canonical "lost in the middle" failure. Sequence on retry:\n  1. Client retries with the same Idempotency-Key.\n  2. Our server selects the idempotency row, finds it in IN_PROGRESS (no response stored yet).\n  3. Two options: (a) block briefly waiting for the original request to finish, or (b) reach out to the PSP\'s GET endpoint with our own idempotency key and reconcile state.\n\nOption (b) is the safer industrial pattern — the PSP\'s idempotency means asking them about our key returns the original result. We then complete our DB commit with the recovered result. The card is never charged twice; the customer either sees success or sees a clear failure with no money moved.' },
+      { question: 'Why double-entry over just a balance column?', answer: 'A balance column is a single number that can be wrong forever once it\'s wrong. Double-entry forces every change to be expressed as two entries that sum to zero. Three benefits:\n  1. Auditable — anyone can recompute the balance from history.\n  2. Reversible — every business event has an inverse you can post without "fixing" the past.\n  3. Constraint-enforced — at end-of-day the sum across every account in a given currency must be zero. Any non-zero is a bug.\n\nThe ledger is also a stream of facts you can replay into other systems (analytics, regulatory reporting, customer statements) without re-deriving from application code.' },
+      { question: 'What\'s the difference between a refund and a dispute? Who eats the cost?', answer: 'Refund is merchant-initiated and friendly — the merchant agrees the customer is owed money, posts an inverse ledger entry, calls the PSP refund API. The merchant loses the sale plus possibly a small per-transaction fee.\n\nDispute (chargeback) is cardholder-initiated via their issuing bank, often hostile. The PSP debits the merchant\'s balance for the disputed amount plus a dispute fee (typically $15–25). The merchant uploads evidence and either wins (debit reversed, fee usually still kept) or loses (debit permanent + fee).\n\nMerchants eat dispute costs entirely unless the transaction was 3DS-authenticated, in which case liability shifts to the issuer for fraud-related disputes (not for "merchandise not received").' },
+      { question: 'How do you handle the PSP going down?', answer: 'Per-PSP circuit breakers in the auth path. Synchronous calls have a hard 3-second timeout. On open circuit:\n  • For new payments: fail fast with a retryable error, queue for background retry with exponential backoff.\n  • If you have multi-PSP routing: failover to a secondary PSP with the same idempotency_key. PSPs don\'t share idempotency state, but the second attempt is keyed on our internal txn_id so we still won\'t double-charge.\n  • For in-flight payments stuck in PROCESSING: a reconciler retries the PSP\'s GET endpoint when the circuit closes to recover state.\n\nNote: a dead PSP is fundamentally a degraded payment day — the only thing you can do is reduce blast radius (fail individual txns fast, don\'t crash the whole API) and recover state when it\'s back.' },
+      { question: 'How do you reconcile when the PSP report disagrees with your ledger?', answer: 'Three patterns of disagreement and how each is resolved:\n  1. PSP shows a txn we don\'t have → we lost a webhook. Manual ingestion: load it into our ledger with the PSP\'s amount/timestamp, replay merchant webhooks, audit-log the recovery.\n  2. We show a txn the PSP doesn\'t → we marked SUCCEEDED prematurely or the PSP never confirmed. Investigate the txn\'s state_events; if no PSP success record exists, the txn should be FAILED. Post a reversal pair to the ledger.\n  3. Amounts disagree → almost always a rounding or currency conversion bug. PSP is the truth for cardholder-side amounts; correct our ledger to match.\n\nReconciliation never auto-resolves discrepancies. It pages on-call. Auto-resolving real money is how you lose customer trust.' },
+      { question: 'What\'s the simplest way to support multi-currency without making the ledger a mess?', answer: 'Three rules:\n  1. Every ledger entry has a single currency. No row contains "USD or EUR".\n  2. Currency conversions are expressed as an entry pair against an fx_holding account, with the rate stored in metadata. The fx_holding account nets to zero across all conversions at end-of-day; any non-zero means you ate FX risk you didn\'t mean to.\n  3. Balances are reported per currency; the customer-facing total is computed at read time using the current rate, never stored.\n\nMost ledger bugs in multi-currency systems come from trying to be clever about "carrying" exchange rates inside transaction rows.' },
+      { question: 'Why is 3D Secure worth the friction?', answer: 'Two reasons:\n  1. Liability shift — for SCA-authenticated payments, fraud-related disputes flow to the issuer, not the merchant. For high-AOV merchants this offsets the conversion hit several times over.\n  2. Compliance — PSD2 in the EU and similar rules in other markets require Strong Customer Authentication for most consumer card payments above small thresholds. Not doing 3DS means declined payments.\n\nThe trade-off is real: 3DS adds friction and ~5–10% drop in conversion. Modern flows use Risk-Based Authentication / 3DS exemptions for low-risk transactions, and step-up to a full challenge only when the risk score is high.' },
+      { question: 'Is "exactly-once" really achievable?', answer: 'Not in the strict distributed-systems sense — at the network level, you can\'t distinguish "your request was lost" from "my response was lost." What you can build is "exactly-once effects" by combining at-least-once delivery with idempotency at every layer:\n  • Client → API: Idempotency-Key on the HTTP request.\n  • API → PSP: an idempotency key forwarded to the PSP.\n  • DB writes: keyed on txn_id with unique constraints.\n  • Webhook delivery: event_id, signed, deduplicated by the receiver.\n\nThe outcome from the customer\'s perspective is exactly-once: one charge, one ledger entry, one notification — no matter how many retries pass through the system.' },
+    ],
   },
   {
     id: 27,
@@ -3705,5 +3736,342 @@ export const systemDesignProblems = [
       { decision: 'Pre-filtering vs post-filtering for metadata', rationale: 'Post-filtering is simple but fails on selective filters (returns too few results). Pre-filtering with a filtered HNSW traversal is accurate but requires the metadata index to be co-located with the vector index, increasing implementation complexity. Most production systems use a selectivity-based routing heuristic.' },
     ],
     keyTakeaways: ['HNSW provides O(log N) query time with high recall but requires the graph to fit in memory — quantisation is essential at billion-vector scale', 'Scatter-gather across shards is the standard distributed query pattern; the coordinator merges per-shard top-K lists into the global result', 'Metadata filtering and ANN search are fundamentally at odds — the routing strategy between pre/post/filtered-traversal is the core design decision for a production vector DB'],
+  },
+  {
+    id: 36,
+    slug: 'design-flash-sale',
+    title: 'Design an E-commerce Flash Sale',
+    difficulty: 'Hard',
+    category: 'Mobile & APIs',
+    tags: ['flash-sale', 'inventory', 'concurrency', 'hot-key', 'queue', 'fraud'],
+    problemStatement: `Design the systems behind a flash sale — a high-demand product (PlayStation drop, limited sneaker release) goes on sale at an announced time, attracting 100× normal traffic in the first minute. The system must sell exactly the available inventory, no more, no fewer, while keeping the rest of the site responsive and resisting bots. Target: 1M concurrent users at T=0, 10K items, sale closes in 30s.`,
+    requirements: {
+      functional: [
+        'Open the sale at a precise time; reject earlier requests',
+        'Sell inventory atomically — never oversell or undersell',
+        'Reserve items in cart for a TTL; release if abandoned',
+        'Accept payment and convert reservations into confirmed orders',
+        'Show the buyer their queue position and ETA',
+        'Limit purchases per customer (e.g., 1 per account)',
+      ],
+      nonFunctional: [
+        'Inventory decrement < 5ms P99 even at 100K rps',
+        'Zero oversell — strict correctness on the count',
+        'Survive a 100× traffic spike without affecting the rest of the site',
+        'Distinguish bots from humans with <1% false positive on humans',
+        'Recover gracefully if payment fails — return inventory to the pool',
+      ],
+    },
+    capacityEstimates: `Concurrent users at T=0: ~1M\nRequest spike: ~100K rps for ~30s, 5–10K rps steady state\nInventory: 10K units in a single Redis key (hot key risk)\nCart TTL: 5–10 min reservation window\nPayment success rate: ~80% — expect to recycle ~20% of reservations back to inventory\nQueue / waiting room: holds up to 1M parked sessions, drips through at ~5K/s`,
+    solutionBreakdown: [
+      { section: 'Traffic Shape and Why Normal Design Fails', content: 'At T=0 you go from ~1K rps to ~100K rps in milliseconds. Two things break:\n  1. The database row holding the inventory count becomes a hot row — every request tries to lock it. Postgres can do hundreds of UPDATEs per second per row; you need tens of thousands.\n  2. The rest of the site (product browsing, account pages) shares the same DB and app servers, so the flash sale takes down everything else as a side effect.\n\nThe design pattern is:\n  • Move inventory off the OLTP database onto a single in-memory atomic counter (Redis).\n  • Front the sale with a virtual waiting room that admits users at a controlled drip.\n  • Isolate the flash-sale stack (its own services, queues, DBs) from the main site so a meltdown is contained.' },
+      { section: 'Atomic Inventory with Redis + Lua', content: 'Inventory lives as a single Redis key inventory:{sku}={n}. Decrement is done via a Lua script (atomic on Redis):\n\n  local n = tonumber(redis.call("GET", KEYS[1]))\n  if not n or n < tonumber(ARGV[1]) then return -1 end\n  return redis.call("DECRBY", KEYS[1], ARGV[1])\n\nReturns -1 if not enough inventory, else the new count. Redis on a modern box handles 100K+ Lua-script ops/sec on a single key. Because the script is atomic on the server, two parallel attempts to take the last unit cannot both succeed.\n\nThe DB still holds the authoritative inventory at the start and end of the sale — Redis is a fast working set seeded at sale open and reconciled at sale close. If Redis is lost mid-sale, you fall back to a "sale paused" state and rebuild from the order log, not from the DB.' },
+      { section: 'Hot Key Sharding', content: 'A single SKU at 100K rps still risks a single Redis shard saturating its CPU. Pattern: shard the inventory across N counters and have clients pick a shard at random:\n\n  inventory:{sku}:shard:0..N-1   (sum = total inventory)\n\nDecrement: client hashes the request to a shard and tries that one. If it returns -1 (empty), it falls back to the next shard. When one shard is empty, the system is N-1 shards away from over-decrementing zero, so this is safe.\n\nN is sized to spread load — e.g., 16 shards × 10K rps each on the hottest sale. Pre-seeding: split the 10K-unit inventory roughly evenly across shards at sale open.\n\nDownside: harder to read "remaining count" precisely — you have to sum N shards. Acceptable since the customer-visible count is approximate anyway ("almost gone").' },
+      { section: 'Virtual Waiting Room', content: 'When the sale opens with 1M concurrent users, the inventory itself only has 10K units — letting everyone in is pointless. A waiting room admits users at a controlled rate and gives the rest a fair queue position.\n\nImplementation:\n  • Edge layer (CloudFront Lambda@Edge or a CDN worker) issues a signed cookie containing { queue_position, admitted_at }.\n  • Position is assigned by a per-region Redis ZADD with the connection timestamp as score.\n  • Admission service drains the queue at a rate proportional to (inventory_remaining / expected_conversion_rate / sale_duration). E.g., for 10K units and 20% conversion in 30s: admit ~5K/s.\n  • Admitted users get a short-lived JWT (60s) that they present to the inventory service. Inventory service rejects requests without a valid admission JWT.\n\nWhy at the edge: keeps the waiting-room traffic completely off the origin app servers. You\'re only doing cheap cookie ops per request.' },
+      { section: 'Cart Reservation with TTL', content: 'Decrementing inventory and waiting for payment are decoupled. On a successful DECR:\n  1. Reservation written to Redis cart:{user_id} = {sku, qty, reserved_at} with a TTL of 8 minutes.\n  2. The user is shown a checkout page with a visible countdown.\n  3. On payment success: convert reservation to a real order (next section).\n  4. On TTL expiry without payment: a Redis keyspace notification triggers a "release inventory" Lambda that does INCRBY back to inventory:{sku} and emits an event.\n\nWhy a TTL: users abandon. Without expiry, 30% of inventory would be locked by people who closed the tab. With 8 minutes, you have a moving capacity that gets recycled.\n\nNote: at sale close, any remaining reservations still respect their TTL. The total can briefly show negative against initial stock (because returns happen after the official sale ends) — that\'s fine, the inventory key is the truth.' },
+      { section: 'Order Pipeline and Payment Reservation', content: 'Once a cart converts (user clicks "pay"):\n  1. Create order in PENDING_PAYMENT state — single transaction, separate write to the orders DB.\n  2. Call the payment system (see Design a Payment System) with an idempotency_key = order_id. Synchronous up to a 3s timeout.\n  3. On success: order → CONFIRMED, send confirmation, remove reservation. The inventory stays decremented.\n  4. On failure: order → FAILED, increment inventory back (INCRBY on the inventory key), remove reservation.\n  5. On timeout: order → PENDING_RECONCILIATION; a janitor job retries against the PSP within 60s and resolves.\n\nThe critical correctness property: at every observable moment, decremented_count = confirmed_orders + active_reservations + recoveries_in_flight. A reconciler runs every minute during the sale to catch drift.' },
+      { section: 'Per-Customer Limits', content: 'Without limits, one buyer takes all 10K units in a script. Two checks:\n  1. Per-account: Redis SETNX limit:{sku}:{user_id} with TTL = sale_duration. If already set, reject. This catches account-multi-purchase.\n  2. Per-payment-method: a separate SETNX on a hash of (cc_token, billing_address). Catches one user buying through multiple accounts with the same card.\n\nAccount-level only is the bare minimum. Sophisticated drops also rate-limit by device fingerprint, IP, and ASN (with manual unblock for shared corporate networks).' },
+      { section: 'Bot Mitigation', content: 'Three layers, each catches a different population:\n  1. Edge bot detection — Cloudflare Bot Management / hCaptcha invisible challenges before the waiting room. Catches script-kiddies and known headless browsers.\n  2. Behavioural signals — TLS fingerprint (JA3), mouse-movement entropy, time-to-click after page load. A real human takes ~2s; a bot takes 80ms.\n  3. Async post-purchase scoring — after the sale, score every order on trust and cancel obviously fraudulent ones before fulfilment.\n\nNo single layer is sufficient. The goal isn\'t "stop all bots" (impossible) but "make bots expensive enough to lose market share to humans". For a $500 sneaker, you can spend $0.10 of fraud spend per attempt and still come out ahead.' },
+      { section: 'Read Path: Stay Responsive', content: 'Most of the 1M concurrent users are not in the queue yet — they\'re hitting the product page, checking sale time, refreshing. That read load can melt the site separately from the inventory contention.\n\n  • The product page is fully static (rendered at build time, served from CDN).\n  • A "is the sale live?" endpoint is cached at the edge with a 5s TTL and reads from Redis only on cache miss.\n  • Remaining-inventory display is heavily debounced — clients pull every 10s, the endpoint returns coarse buckets ("plenty", "low", "going fast") not exact counts. Removes a hot read path entirely.\n  • Account/login flows for the sale are isolated from the main site\'s auth tier so a sale meltdown doesn\'t lock people out of the rest of the catalogue.' },
+      { section: 'Failure Modes', content: 'Specific scenarios and how the design covers them:\n  • Redis primary fails mid-sale → automatic failover to replica. Replica may have lost the last few decrements; on promotion, replay the last N seconds of the order log to converge. During failover, inventory writes pause for ~5s.\n  • Payment system is slow → reservations TTL but orders are stuck in PENDING_PAYMENT. The reconciler eventually resolves; the customer sees a "we\'re still confirming" page. This is the worst UX of any failure mode and the one to invest in optimising.\n  • Waiting room admits too fast → admission rate is dynamic, computed from observed conversion rate. If conversion spikes (low-friction signed-in users), we slow admission. If conversion drops (everyone\'s bouncing), we speed it up.\n  • Inventory accidentally over-decremented (bug) → the Lua script never returns success for inventory < 0, so this requires a bug above the script (double-spending an admission token). The reconciler catches it within a minute and refunds the duplicate orders. Customer trust is preserved by being explicit about the bug and refunding before they notice.' },
+      { section: 'Observability', content: 'Dashboards segmented by the sale (not aggregated with rest of site):\n  • Real-time: rps at edge, admission rate, decrement_rps, payment_success_rate, reservation_conversion_rate, cart_TTL_expiry_rate.\n  • Inventory health: per-shard counter values, time since last decrement, sum across shards vs initial allocation.\n  • Bot signal: ratio of admissions that came from challenged sessions, captcha solve rate.\n  • Fraud signal: orders blocked by per-customer limit, post-sale risk score distribution.\n\nAlerting that pages on-call mid-sale:\n  • decrement_rps falls to zero with inventory remaining (something\'s wedged).\n  • payment_success_rate drops below 50% (PSP problem).\n  • reservation_TTL_expiry_rate above 40% (admission rate too high — customers can\'t check out fast enough).\n\nPost-mortems on every sale are mandatory. Every drop is a load test in production.' },
+    ],
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web Buyer]
+        Mobile[Mobile Buyer]
+        Bot[Suspected Bot Traffic]
+    end
+    subgraph Edge
+        CDN[Static CDN Product Page]
+        WAF[WAF and Bot Detection]
+        Edge[Edge Worker Waiting Room]
+        Geo[Geo-DNS]
+    end
+    subgraph Gateway
+        APIGW[Sale API Gateway]
+        Auth[Auth and Session]
+        RL[Per-Customer Rate Limiter]
+        AdmJWT[Admission JWT Verifier]
+    end
+    subgraph Services
+        QueueSvc[Waiting Room Queue Svc]
+        AdmSvc[Admission Rate Controller]
+        InvSvc[Inventory Service]
+        CartSvc[Cart Reservation Svc]
+        Checkout[Checkout Service]
+        OrderSvc[Order Service]
+        PaymentClient[Payment System Client]
+        LimitSvc[Per-Customer Limit Svc]
+        ReconSvc[Inventory Reconciler]
+    end
+    subgraph Async
+        TTLSweeper[Reservation TTL Sweeper]
+        OrderQ[Order Confirmation Queue]
+        FraudScorer[Post-Sale Fraud Scorer]
+        ReplayJob[Decrement Log Replay]
+        Analytics[Analytics Streamer]
+    end
+    subgraph Storage
+        InvRedis[(Inventory Redis Sharded Counters)]
+        CartRedis[(Cart Reservations Redis TTL)]
+        QueueRedis[(Waiting Room ZSET Redis)]
+        LimitRedis[(Per-Customer Limits Redis)]
+        OrdersDB[(Orders DB Postgres)]
+        DecLog[(Decrement Audit Log)]
+        SaleConfig[(Sale Config DB)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Sale Events]
+        Lake[(Data Lake)]
+        Dash[Realtime Dashboard]
+    end
+
+    Web -->|product page| Geo --> CDN
+    Mobile --> Geo
+    Web -->|join sale| WAF --> Edge
+    Mobile --> WAF
+    Edge --> QueueSvc --> QueueRedis
+    Edge --> AdmSvc
+    AdmSvc --> SaleConfig
+    AdmSvc -->|signed JWT| Edge
+
+    Edge -->|admitted| APIGW
+    APIGW --> Auth
+    APIGW --> AdmJWT
+    APIGW --> RL --> LimitRedis
+    APIGW --> InvSvc
+    InvSvc -->|Lua DECR| InvRedis
+    InvSvc --> DecLog
+    InvSvc --> CartSvc --> CartRedis
+    CartSvc -->|TTL expiry event| TTLSweeper --> InvSvc
+
+    CartSvc --> Checkout --> OrderSvc --> OrdersDB
+    OrderSvc --> PaymentClient
+    PaymentClient -.->|failure| InvSvc
+    OrderSvc --> OrderQ --> FraudScorer
+    OrderSvc --> LimitSvc --> LimitRedis
+
+    DecLog --> ReplayJob
+    InvRedis --> ReconSvc --> OrdersDB
+
+    Bot --> WAF
+    InvSvc --> EventBus --> Lake
+    EventBus --> Dash
+    EventBus --> Analytics
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class InvRedis,CartRedis,QueueRedis,LimitRedis,OrdersDB,DecLog,SaleConfig storage
+    class TTLSweeper,OrderQ,FraudScorer,ReplayJob,Analytics async
+    class CDN,WAF,Edge,Geo edge
+    class EventBus,Lake,Dash analytics`,
+    tradeoffs: [
+      { decision: 'Redis atomic counter vs database row', rationale: 'Redis Lua scripts handle 100K+ ops/sec on a single key with atomic guarantees; an OLTP database tops out at hundreds for a hot row. Trade-off: Redis is a less durable system of record — you accept reconciling the audit log against orders at sale close and on failover. The database remains the authoritative inventory at rest.' },
+      { decision: 'Hot-key sharding vs single key', rationale: 'Sharding spreads load across Redis shards but makes "exact count" queries expensive (must sum). Single key keeps the count exact but caps throughput per SKU. Almost always shard when peak rps per SKU exceeds ~30K.' },
+      { decision: 'Waiting room at the edge vs in the app', rationale: 'Edge waiting rooms keep the spike off your origin entirely — your app sees a steady, controlled stream. Cost: more complex (custom edge logic, signed cookies). In-app queuing is simpler but every parked user still hits your servers. For >10× spikes the edge approach is essentially required.' },
+      { decision: 'Synchronous reservation vs queue-and-confirm', rationale: 'Synchronous: user clicks "buy", sees instant confirm or fail. Higher abandonment for failed payments, better UX for successes. Queue-and-confirm: every successful inventory decrement enqueues an order to a downstream worker that handles payment async; user sees "we will email you". Better behaviour under PSP overload, worse perceived UX. Most consumer drops are synchronous.' },
+      { decision: 'Per-customer limit by account vs payment method vs device', rationale: 'Account limits are cheap and bypassed by anyone with multiple accounts. Payment-method limits catch reuse of one card. Device fingerprinting catches sophisticated bot farms but has false positives on shared family devices. Stack all three with decreasing strictness — auto-cancel on account/payment violations, manual review on device-only signals.' },
+    ],
+    keyTakeaways: [
+      'Move inventory off the OLTP database onto an atomic in-memory counter — the row lock is the bottleneck, and a Redis Lua script removes it',
+      'A virtual waiting room at the edge is the only practical way to handle a 100× spike without your origin melting',
+      'Reservations with TTLs are essential — without them, abandoned carts permanently lock 20–30% of inventory',
+      'Every layer of the stack needs idempotency: the inventory script, the order create, the payment call, the inventory return on failure',
+      'Bot mitigation is a layered defence; no single mechanism stops a determined adversary, the goal is to make bots more expensive than humans',
+    ],
+    faqs: [
+      { question: 'Why use Redis for inventory instead of just an indexed DB column with SELECT FOR UPDATE?', answer: 'SELECT FOR UPDATE on a single row serialises all writers through that row\'s lock. Postgres can do a few hundred such transactions per second on a single row; we need 100K. Redis is single-threaded per shard but each op is nanoseconds in memory rather than a multi-step ACID transaction, so a single Redis shard handles tens of thousands of Lua-script ops/sec on the same key.\n\nThe DB still matters: it holds the authoritative inventory at sale open and absorbs the order writes downstream. Redis is the high-throughput hot path during the sale itself. At sale close, you reconcile Redis decrements against confirmed orders and update the DB.' },
+      { question: 'What happens if Redis loses the inventory counter mid-sale?', answer: 'Three protections:\n  1. Redis is configured with AOF persistence (fsync every second) on a replicated cluster. On primary failure, the replica is promoted; you lose at most ~1s of decrements.\n  2. Every successful DECR also writes to a Kafka decrement_log (or DB). On Redis crash, the log is the source of truth for what was sold — you can replay it onto a freshly initialised counter.\n  3. The sale enters a "paused" state if Redis health degrades. New buyers see a "verifying inventory" page rather than potential oversell. Better one minute of pause than a thousand-unit oversell.\n\nThe reconciler runs continuously and flags drift between (initial inventory − decrements_in_log) and (Redis current value). Drift > some threshold pages on-call.' },
+      { question: 'How do you stop someone scripting the inventory decrement?', answer: 'You can\'t completely — but you make it not worthwhile. Stacked defences:\n  • Edge bot detection (WAF + TLS fingerprint) rejects ~80% of script traffic before it ever hits your origin.\n  • Admission JWT is required to call the inventory endpoint — and it\'s only issued by the waiting room. Scripts that skip the queue get rejected.\n  • Per-account limit: SETNX on user_id, sale-duration TTL. One purchase per account.\n  • Per-payment-method check: same SETNX on hash(card_token, address).\n  • Post-sale fraud scoring cancels orders that look automated (new account + new card + unusual delivery address combination) before fulfilment.\n\nResult: a determined attacker can still buy a few units across many accounts and cards. The economics of running that operation are usually unfavourable at scale.' },
+      { question: 'What if the payment system is slow during the sale?', answer: 'This is the failure mode most likely to ruin a sale. Defences in priority order:\n  1. The payment call is timed out at 3s and queued for async retry on timeout, so a slow PSP doesn\'t pin the user\'s request thread.\n  2. On payment timeout, the order goes to PENDING_PAYMENT, not FAILED. We don\'t release inventory until we know the payment failed.\n  3. The reconciler retries the PSP\'s GET endpoint until a definitive answer; up to 60s. If still PENDING after that, customer sees a "we will email confirmation" page.\n  4. Multi-PSP routing means a single PSP slowdown doesn\'t hit 100% of buyers.\n\nThe inventory is briefly underconsumed (decremented but no confirmed order) — this is fine. The reconciler cleans up after.' },
+      { question: 'How do you show the buyer their queue position fairly?', answer: 'On join, the edge worker does a Redis ZADD waiting_room {timestamp_ms} {session_id}. Position is the rank of that session_id in the sorted set. The position is shown to the user as "you are #324,123 of 1,000,000". The admission service drains from the lowest rank (oldest first) at the admission rate.\n\nFairness considerations:\n  • Per-region queues prevent a US user from being stuck behind 500K EU users for an EU-only sale.\n  • The score should be the actual arrival timestamp, not a counter, so brief network blips don\'t reorder users.\n  • Display "ETA" as a tight range, not a point estimate, because admission rate varies.\n\nWhat you do not do: bump high-value customers up the queue without disclosing it. That gets discovered and burns trust.' },
+      { question: 'Why expose coarse inventory ("almost gone") instead of exact count?', answer: 'Two reasons:\n  1. Performance — exact count is a sum across N sharded counters. At 1M concurrent users polling every second, that\'s 1M reads/s of an N-key sum. Coarse buckets ("plenty", "low", "going fast") can be cached at the edge with a 10s TTL.\n  2. Manipulation resistance — exact counts let bots probe the system ("am I close enough that decrementing is profitable?"). Coarse counts force them to commit before knowing the exact state.\n\nThere\'s a small trust trade-off: customers may distrust "going fast" if they\'ve seen it gamed. Honesty post-sale (publish exact units sold and to whom — anonymised) builds back trust.' },
+      { question: 'How is this different from a hotel/flight booking system?', answer: 'Booking systems care about a calendar of available slots over time (rooms × nights). Their concurrency is on a small number of items but spread over many dates, and their hold-times can be 15 minutes with little harm. Flash sales care about a single SKU with thousands of buyers contending for one decrement op, and the entire sale lasts seconds. Different read pattern (heavy hot-key contention vs heavy index scan for availability), different write pattern (one counter vs many overlapping date ranges), different fraud profile (bot-script supply hoarding vs scalpers).\n\nFor a unified booking + drop system (e.g., concert tickets with timed sales — see Design Ticketmaster), you combine both patterns.' },
+      { question: 'What about the rest of the catalogue during the sale?', answer: 'Isolate or it goes down with the sale. Specifics:\n  • The sale stack runs in its own service mesh / cluster — separate ASGs, separate DBs, separate Redis.\n  • Shared services (auth, accounts) are sized for the full spike and circuit-broken so the sale can\'t starve them.\n  • The main site\'s read path goes through its own caches; nothing on the hot path queries the sale\'s Redis.\n  • Internal APIs the sale stack calls into the main stack (e.g., to look up user address) have client-side circuit breakers — the sale degrades to "address required, please retry" rather than crashing.\n\nThe goal: a meltdown of the sale stack causes the sale to fail, not the whole business.' },
+    ],
+  },
+  {
+    id: 37,
+    slug: 'design-ticketmaster',
+    title: 'Design Ticketmaster',
+    difficulty: 'Hard',
+    category: 'Mobile & APIs',
+    tags: ['booking', 'inventory', 'seat-map', 'queue', 'bot-mitigation', 'dynamic-pricing'],
+    problemStatement: `Design a live-event ticketing platform like Ticketmaster. Users browse events, see a seat map, select specific seats, hold them while completing payment, and receive a ticket. The system must handle concert on-sales where 2M people hit the site for 50,000 tickets in 60 seconds, prevent two users from buying the same seat, resist bot armies, and support dynamic pricing and verified resale. Target: 2M concurrent at on-sale, 100M tickets/year.`,
+    requirements: {
+      functional: [
+        'Browse events, filter by date/venue/artist',
+        'View interactive seat map with per-seat pricing and availability',
+        'Select seats and hold them for a TTL while paying',
+        'Process payment and issue digital tickets (QR / NFC)',
+        'Verified resale marketplace with price caps and identity binding',
+        'Virtual waiting room with fair queue position per event',
+        'Dynamic pricing tiers (presale, general, last-minute)',
+      ],
+      nonFunctional: [
+        'Zero double-booking — a seat is sold to one buyer or no one',
+        'Seat map read p99 < 200ms during on-sale',
+        'Hold/release seat operation < 50ms p99',
+        'Survive 100× normal traffic during on-sale',
+        '99.9% available during on-sale (down for 5 min = catastrophe)',
+        'Bot detection with <1% false positive on humans',
+      ],
+    },
+    capacityEstimates: `On-sale peak: 2M concurrent connections, ~200K rps for ~3 min\nSteady state: 50K rps\nSeat inventory per event: up to 100K seats stored as a seat-status grid\nHolds: ~3M outstanding mid-sale (15M attempts × 20% pass-through), 8 min TTL each\nPayment integrations: multiple PSPs with multi-region routing\nWaiting room: queues up to 2M parked sessions per event`,
+    solutionBreakdown: [
+      { section: 'Why This Is Hard', content: 'Two patterns collide at on-sale:\n  1. Hot-inventory concurrency (like a flash sale) — thousands of buyers contending for the same seat.\n  2. Multi-dimensional inventory — each event has tens of thousands of distinct seats, each with its own pricing tier, view-quality rating, accessibility metadata, and availability state.\n\nA pure flash-sale design (single atomic counter) doesn\'t work because buyers want specific seats. A pure booking-system design (DB row per seat) doesn\'t work because the hot path is too contended. The answer is a hybrid: per-section in-memory inventory with a seat-level hold layer in Redis, fronted by an aggressive waiting room and bot defence.' },
+      { section: 'Event and Seat Inventory Model', content: 'Two tables for each event:\n  events(id, artist, venue_id, doors_open_at, on_sale_at, total_seats, status)\n  seats(event_id, section, row, seat_no, tier, price_cents, accessibility_flags, status)\n      PK = (event_id, section, row, seat_no)\n\nstatus enum: AVAILABLE | HELD | SOLD | RESERVED_HOLDBACK | RELEASED\n\nAt event creation, ~100K seat rows are inserted. The seats table is the source of truth at rest but is never the hot read/write path at on-sale. Instead, at on-sale open, the entire seat grid is materialised into Redis as a per-section hash:\n\n  event:{eid}:section:{sid} = { "R5S12": "AVAILABLE", "R5S13": "HELD:hold_id", ... }\n\nThis allows whole-section reads (the user wants to see "show me upper-bowl seats") with one Redis call and atomic per-seat updates via HSET CAS.' },
+      { section: 'Seat Map Read Path', content: 'When the user opens the seat map:\n  1. The event\'s static metadata + base seat layout is fetched from CDN (rendered at event creation, cacheable for hours).\n  2. The live availability overlay is fetched from Redis with one HGETALL per section the user is viewing — typically just one section unless they zoom out.\n  3. Client renders the seat map as SVG with hovered availability state.\n\nBecause sections are independent hashes, a single section being mutated heavily doesn\'t slow reads of other sections. Polling at 2s intervals during shopping is fine; WebSocket push for live updates is a polish move (worth it for premium events).' },
+      { section: 'Seat Hold with TTL and Atomic CAS', content: 'When the user clicks a seat:\n  HOLD operation, Lua script atomically:\n    1. HGET event:{eid}:section:{sid} field {row}{seat}\n    2. If status != "AVAILABLE", return REJECT.\n    3. HSET to "HELD:{hold_id}", set held_at, write hold record.\n    4. Set TTL on a separate key hold:{hold_id} = {seats, user_id, expires_at} for 8 min.\n  Return ACCEPT with hold_id.\n\nMulti-seat purchases (group of 4) are a single Lua call that either holds all 4 or none. Using Redis hash CAS for each seat means contention is fine-grained — only buyers fighting for the exact same seat conflict.\n\nOn TTL expiry (Redis keyspace notification), an async worker releases each seat back to AVAILABLE and deletes the hold record. The release path is itself a Lua script that checks the seat is still HELD:{hold_id} before flipping it back, so a late confirmation can\'t race with a release.' },
+      { section: 'Virtual Waiting Room with Fair Per-Event Queue', content: 'On-sale opens at a published moment. A waiting room is the only way to manage the spike fairly:\n  • Edge worker enqueues each session into a per-event Redis sorted set with score = arrival timestamp.\n  • Admission service drains the queue at a controlled rate, computed from observed conversion (tickets sold per admitted user).\n  • Each admitted session gets a 60s JWT scoped to that event. The seat APIs reject requests without a valid admission JWT.\n\nThe queue is per-event so a Taylor Swift on-sale doesn\'t back up smaller concurrent on-sales. Regional sub-queues prevent geographic unfairness on tour-wide on-sales.\n\nThe waiting room also fingerprints sessions: TLS fingerprint, header set, behavioural signals. High-trust sessions (logged-in account with purchase history, presale code, mobile app) are admitted faster than fresh anonymous browser sessions. This is the lever that limits bot-controlled inventory without losing too many real fans.' },
+      { section: 'Bot Mitigation and Trust Scoring', content: 'Industry rule of thumb: at a major on-sale, 60–90% of incoming traffic is automated. Defences:\n\n  1. Pre-admission challenges — invisible bot detection (Akamai BotManager, Cloudflare Turnstile) at the edge. Reject obvious script clients. Escalate to a captcha for suspicious cases.\n  2. Account binding — high-demand on-sales require a registered account with a verified phone number and a payment method on file before the on-sale opens. This makes account farms expensive.\n  3. Presale codes — a code distributed to fans (via the artist\'s mailing list) is required for early access. The code is single-use, account-bound, and rate-limited per IP.\n  4. Per-customer ticket caps — 4 tickets per account per show is typical. Enforced via SETNX on (account_id, event_id) with sale-duration TTL.\n  5. Async post-purchase scoring — every order is scored on 200+ features and orders with risk score > threshold are cancelled and refunded before tickets are issued. Customer-visible: "your order is being verified."\n  6. Identity binding at issuance — for premium events, tickets are bound to the buyer\'s photo ID and only that person can use them. Defeats the resale model for that event.\n\nNo single layer wins. Together they make running a profitable bot operation hard.' },
+      { section: 'Dynamic Pricing', content: 'Three pricing modes that coexist:\n  • Tier pricing — fixed prices per section ($150 floor, $90 mezz, $50 upper). Set at event creation.\n  • Presale tiers — discounted prices during a limited presale window, controlled by promo code.\n  • Demand-based ("platinum" / "official platinum") — prices float in response to demand, reset every few minutes by a pricing service that reads (holds / available_seats) per section and pushes new prices to a pricing cache.\n\nPricing cache is Redis with a 30s TTL. The price the user sees is the price they pay — once a hold is placed, the price is locked to the hold record, even if the cache updates before checkout completes. This avoids "price changed during checkout" disputes.\n\nDynamic pricing is contentious — it captures money that would otherwise go to scalpers, but creates PR risk ("Ticketmaster charged $500 for a $90 seat"). System should be capable of disabling dynamic pricing per event at the artist\'s request.' },
+      { section: 'Checkout, Payment, and Ticket Issuance', content: 'Once a hold is established and the user clicks "purchase":\n  1. Order created in PENDING with order_id = hold_id (one-to-one).\n  2. Payment system called synchronously with idempotency_key = order_id (see Design a Payment System).\n  3. On payment success: a Lua script atomically converts every HELD:{hold_id} seat to SOLD:{order_id}, marks the order CONFIRMED, and enqueues ticket issuance.\n  4. Ticket issuance generates a per-ticket QR / NFC payload signed with a rotating HMAC key, stores the ticket record, sends to the user.\n\nFailure paths:\n  • Payment declined → release holds, mark order FAILED, the seats become available again.\n  • Network drop after PSP success → the payment system\'s idempotency replays the success; our reconciler converts holds to SOLD.\n  • Holds TTL expires while payment is in flight → the order is in PENDING but seats may have been released. A janitor catches this and either re-holds or refunds.' },
+      { section: 'Verified Resale Marketplace', content: 'Scalping is the visible problem; verified resale is the platform\'s answer.\n  • A SOLD ticket can be listed for resale at the original purchase price up to N% above (configurable per artist; some require resale ≤ face value).\n  • The buyer is matched to a SOLD ticket; on payment, the ticket is invalidated and a new ticket is issued to the buyer bound to their identity.\n  • The seller is paid via the merchant payout path; the platform takes a fee.\n  • Listings include verified original-purchase provenance — the buyer knows the ticket is real, not a fake screenshot.\n\nThis runs as a separate service against the same seat/order DB. The atomicity is "transfer ticket from seller to buyer" — done as a single DB transaction. Identity binding at the venue door is what makes the marketplace work; it eliminates the secondary scalping market because tickets can\'t be resold off-platform.' },
+      { section: 'Section-Level Sharding', content: 'A 100K-seat stadium on a single Redis shard would saturate during on-sale. Shard inventory by (event_id, section_id) so each shard handles ~5K seats. Hot sections (floor, sound-of-stage) get their own shards if traffic is uneven.\n\nThe routing layer maintains a mapping (event_id, section_id) → redis_shard, refreshed from a control plane every minute. Section-level sharding is enough — seat-level would just multiply round trips for no win, since most contention is within the same hot section anyway.' },
+      { section: 'Notification System', content: 'Several notification flows (see Design a Notification System for the underlying mechanism):\n  • Pre-sale reminder push 24h, 1h, 5 min before on-sale.\n  • Waiting room ETA updates (push when the user is admitted).\n  • Hold expiration warning (2 min before TTL).\n  • Purchase confirmation with ticket attachment.\n  • Day-of-event reminders with venue info and ticket QR.\n  • Event changed/cancelled notifications.\n\nAll of these are templated and routed through the notification service\'s priority queues. Day-of-event reminders are the lowest priority; "your hold is about to expire" is the highest because they\'re time-critical.' },
+      { section: 'Failure Modes', content: '  • Waiting room admits too many at once → admission rate is dynamic, controlled per shard. If decrement_latency or hold_failure_rate climbs, admission slows automatically.\n  • Redis hash CAS fails consistently → likely a hot section is sharded too coarsely. Operators can re-shard a single section live by issuing a freeze on writes, copying to the new shard, and routing flips. Lasts ~30s.\n  • Holds wedged in PROCESSING after PSP timeout → reconciler retries PSP within 60s, either confirms or releases.\n  • Mass cancellation event (artist drops out) → an event-level command sets every SOLD ticket to PENDING_REFUND, the refund pipeline processes them in batches with auto-generated emails.\n  • DDoS during on-sale → distinct from legitimate spike. Edge layer fingerprints and rate-limits ASNs / IP blocks; the bot detection layer is the same code, just tuned more aggressively. The waiting room itself does most of the protection by parking attackers in the queue rather than letting them hit origin.' },
+      { section: 'Observability', content: 'Real-time dashboards split per on-sale event:\n  • Waiting room: queue depth, admission rate, observed conversion, drop-off rate.\n  • Inventory: per-section hold count, sold count, available count, hold→sold conversion.\n  • Payment: per-PSP auth rate, p99 latency, multi-PSP routing distribution.\n  • Bot signal: pre-admission rejection rate, captcha presented rate, captcha solve rate.\n  • Customer: hold TTL expiry rate (high = admission rate too aggressive).\n  • Trust: post-purchase cancellation rate (high = bot mitigation too lax).\n\nThe ratio of admitted users to tickets sold is the master health metric — too high means you\'re wasting people\'s time in the queue; too low means you ran out of seats faster than expected. Target is calibrated per artist.' },
+    ],
+    diagram: `graph TB
+    subgraph Clients
+        Web[Web Browser]
+        Mobile[Mobile App]
+        BoxOffice[Box Office Terminal]
+    end
+    subgraph Edge
+        CDN[Static CDN Seat Maps]
+        WAF[WAF and Bot Detection]
+        EdgeWR[Edge Waiting Room]
+        Geo[Geo-DNS]
+    end
+    subgraph Gateway
+        APIGW[API Gateway]
+        Auth[Auth and Account Svc]
+        AdmJWT[Admission JWT Verifier]
+        RL[Per-User Rate Limit]
+    end
+    subgraph Services
+        EventSvc[Event Catalog Service]
+        SeatMapSvc[Seat Map Service]
+        HoldSvc[Hold Service]
+        CheckoutSvc[Checkout Service]
+        OrderSvc[Order Service]
+        TicketSvc[Ticket Issuance Service]
+        PaymentClient[Payment System Client]
+        PricingSvc[Dynamic Pricing Service]
+        TrustSvc[Trust and Bot Scoring]
+        ResaleSvc[Verified Resale Service]
+        QueueSvc[Waiting Room Queue Svc]
+        AdmSvc[Admission Rate Controller]
+        NotifClient[Notification Client]
+    end
+    subgraph Async
+        TTLSweeper[Hold TTL Sweeper]
+        FraudScorer[Post-Purchase Fraud Scorer]
+        PricingTrainer[Pricing Model Updater]
+        TicketGen[Ticket QR Generator]
+        ReconJob[Inventory Reconciler]
+        CancelBatcher[Mass Cancel Batcher]
+    end
+    subgraph Storage
+        EventDB[(Events DB Postgres)]
+        SeatsDB[(Seats Catalog DB)]
+        SeatInv[(Seat Inventory Redis per Section)]
+        Holds[(Holds Redis TTL)]
+        OrdersDB[(Orders DB)]
+        TicketsDB[(Issued Tickets DB)]
+        PricingCache[(Pricing Cache Redis)]
+        ResaleDB[(Resale Listings DB)]
+        TrustStore[(Trust Score Feature Store)]
+        QueueZSet[(Waiting Room ZSET)]
+    end
+    subgraph Analytics
+        EventBus[Kafka Sale Events]
+        Lake[(Data Lake)]
+        Dash[On-Sale Dashboard]
+    end
+
+    Web -->|browse| Geo --> CDN
+    Web -->|on-sale start| WAF --> EdgeWR
+    Mobile --> WAF
+    EdgeWR --> QueueSvc --> QueueZSet
+    EdgeWR --> AdmSvc --> EventDB
+    AdmSvc -->|admission JWT| EdgeWR
+
+    EdgeWR -->|admitted| APIGW
+    APIGW --> Auth
+    APIGW --> AdmJWT
+    APIGW --> RL
+    APIGW --> EventSvc --> EventDB
+    APIGW --> SeatMapSvc --> SeatInv
+    SeatMapSvc --> SeatsDB
+    SeatMapSvc --> PricingSvc --> PricingCache
+
+    APIGW -->|select seats| HoldSvc
+    HoldSvc -->|Lua CAS| SeatInv
+    HoldSvc --> Holds
+    Holds -.->|TTL expiry| TTLSweeper --> HoldSvc
+
+    APIGW -->|checkout| CheckoutSvc --> OrderSvc --> OrdersDB
+    OrderSvc --> PaymentClient
+    PaymentClient -.->|fail| HoldSvc
+    OrderSvc --> TrustSvc --> TrustStore
+    OrderSvc --> FraudScorer
+    OrderSvc --> TicketSvc --> TicketsDB
+    TicketSvc --> TicketGen --> TicketsDB
+    TicketSvc --> NotifClient
+
+    BoxOffice --> APIGW
+
+    APIGW -->|resale| ResaleSvc --> ResaleDB
+    ResaleSvc --> TicketsDB
+    ResaleSvc --> PaymentClient
+
+    SeatInv --> ReconJob --> SeatsDB
+    EventBus --> CancelBatcher --> OrderSvc
+
+    PricingTrainer --> PricingCache
+    HoldSvc --> EventBus
+    OrderSvc --> EventBus
+    EventBus --> Lake
+    EventBus --> Dash
+
+    classDef storage fill:#1e3a5f,stroke:#3b82f6,color:#dbeafe
+    classDef async fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    classDef edge fill:#14532d,stroke:#22c55e,color:#dcfce7
+    classDef analytics fill:#713f12,stroke:#eab308,color:#fef9c3
+    class EventDB,SeatsDB,SeatInv,Holds,OrdersDB,TicketsDB,PricingCache,ResaleDB,TrustStore,QueueZSet storage
+    class TTLSweeper,FraudScorer,PricingTrainer,TicketGen,ReconJob,CancelBatcher async
+    class CDN,WAF,EdgeWR,Geo edge
+    class EventBus,Lake,Dash analytics`,
+    tradeoffs: [
+      { decision: 'Per-section Redis hash vs per-seat key', rationale: 'Per-section hash lets one HGETALL fetch a whole section\'s availability for the seat map view, and HSET CAS handles individual holds. Per-seat keys allow finer-grained sharding but multiply round trips for reads and complicate atomic multi-seat holds. Per-section wins because the dominant read pattern is "show me this section".' },
+      { decision: 'Hold TTL: 5 min vs 15 min', rationale: 'Short TTL keeps inventory recycling fast but punishes slow checkout (older buyers, accessibility needs). Long TTL gives buyers time but locks seats during abandonment. 8 minutes is the industry standard; some artists request 15 for accessibility. Make it configurable per event, not global.' },
+      { decision: 'Dynamic pricing on vs off', rationale: 'On: captures money that would go to scalpers, reduces secondary-market spread. Off: stable prices, fewer angry headlines, less perceived gouging. Most platforms expose dynamic pricing as a per-event toggle controlled by the artist team, not a global default.' },
+      { decision: 'Identity-bound tickets vs transferable tickets', rationale: 'Identity-bound (ID checked at venue): kills the secondary market but loses gifting and resale revenue. Transferable: customer-friendly but enables off-platform scalping. Hybrid: tickets are transferable inside the platform (verified resale) but not outside it, by binding the QR to the wallet at issuance.' },
+      { decision: 'Synchronous payment vs queue and confirm', rationale: 'Synchronous: better UX for the 80% success case but PSP slowness blocks the user\'s thread. Queue-and-confirm: every payment is async, user sees "we will confirm shortly". Most on-sales use synchronous with a 3s timeout and async fallback; the worst UX is a long synchronous wait with no feedback.' },
+    ],
+    keyTakeaways: [
+      'Hybrid inventory model: source-of-truth in Postgres, hot-path inventory in per-section Redis hashes with Lua CAS for atomic holds',
+      'A two-stage flow (hold then buy) is essential when buyers choose specific items — but the hold layer becomes the hardest correctness problem in the system',
+      'Bot mitigation is the dominant operational concern; account binding + presale codes + trust scoring + post-purchase verification are the four legs of the stool',
+      'Section-level sharding gives you fine-grained scale-out without the round-trip cost of seat-level sharding',
+      'Identity binding at issuance + verified resale is the only structural answer to off-platform scalping',
+    ],
+    faqs: [
+      { question: 'How do you stop two users from buying the same seat?', answer: 'The HOLD operation is a Lua script that does atomic compare-and-set on the section\'s Redis hash: it reads the seat\'s status field, verifies it is AVAILABLE, and writes HELD:{hold_id} all in one server-side operation. Redis is single-threaded per shard, so the script runs to completion before any other client can touch the same hash field. Two concurrent HOLD attempts on the same seat: one wins atomically, the other reads HELD and returns a rejection.\n\nThe later CONVERT_TO_SOLD operation (at payment success) again uses CAS — it only flips HELD:{hold_id} to SOLD:{order_id} if the field still matches HELD:{hold_id}. So a hold that expired (releasing the seat to someone else) before payment completed cannot accidentally sell to the original holder. The customer is refunded and shown a friendly "your hold expired" message.' },
+      { question: 'How does the virtual waiting room actually work — what does the user see?', answer: 'On the on-sale page just before the start time, the user clicks "join the queue". The edge worker:\n  1. Issues a signed session cookie.\n  2. ZADD waiting_room:{event_id} {now_ms} {session_id}.\n  3. Returns a page showing "you are #324,123 of 1,432,001" with an ETA.\n\nThe page polls the edge every ~5s for position updates (cheap — it\'s a single ZRANK on the cookie). When the admission service drains the queue and the user\'s session is admitted, the next poll redirects them to the live seat map with an admission JWT cookie. The seat APIs reject any request without a valid admission JWT, so anyone bypassing the queue UI still gets rejected.\n\nThe queue is per-event so different on-sales don\'t share contention. Per-region sub-queues are added for international tours to avoid one region\'s users being stuck behind another\'s.' },
+      { question: 'Why bind tickets to identity? Isn\'t that hostile to gifting?', answer: 'Identity binding (the QR is only valid when presented by the buyer\'s wallet on a phone signed into the buyer\'s account) is the structural fix for off-platform scalping. Without it, tickets are bearer instruments that anyone can resell on third-party sites at any markup.\n\nGifting and legitimate resale are preserved via in-platform transfer: from the buyer\'s account, "transfer to" issues a new QR for the recipient and invalidates the old one. The platform sees and records every transfer.\n\nThe trade-off is real friction: the recipient must have an account and install the app. For most artists this is acceptable. For some (high-school musicals, family events) it\'s overbearing and the system should fall back to transferable QR. Make it a per-event toggle.' },
+      { question: 'Why two different inventory layers (Redis section hashes and Postgres seats table)?', answer: 'Postgres is the source of truth at rest. It survives Redis failure, it integrates with analytics and reporting, it\'s where the seat catalogue lives. But Postgres can\'t do 200K hash-CAS ops/sec on a single record.\n\nRedis is the hot path during the on-sale. At sale open, the seat grid is hydrated from Postgres into Redis. Every hold and sale updates Redis. Every state change is also written to a Kafka event log (and reconciled into Postgres asynchronously). At sale close, a final reconciliation flushes Redis state into Postgres and the seats table becomes authoritative again.\n\nIf Redis dies mid-sale, the Kafka event log + last Postgres snapshot is enough to reconstruct state. A "sale paused" mode handles the gap. You never serve from a state that hasn\'t been confirmed durable.' },
+      { question: 'What about presale codes — what stops bots from harvesting them?', answer: 'Three controls:\n  1. Codes are distributed via verified-account channels (artist mailing list to known accounts, premium card programs). Each code is bound to one account.\n  2. Codes have a per-code rate limit on attempts — a code used 100 times in 10 seconds is auto-revoked and the using accounts flagged.\n  3. Codes activate a "presale" admission tier in the waiting room — they don\'t bypass the queue, just enter a smaller, higher-trust queue with lower contention.\n\nThe goal isn\'t cryptographic secrecy of the code — codes leak, that\'s reality. The goal is making leaked codes worthless because the systems behind them limit how much each code can be used and how many tickets it can unlock.' },
+      { question: 'What if the venue capacity changes after on-sale opens (added seats, reduced rows)?', answer: 'Two cases:\n  1. Adding seats — the operator inserts new rows into the seats table with status=AVAILABLE, runs a script that adds them to the Redis section hash, and the new seats appear in the seat map on the next refresh.\n  2. Removing seats — must only remove AVAILABLE seats; otherwise you\'re cancelling a buyer\'s purchase. The operator runs a script that does an atomic check (HSET only if AVAILABLE → REMOVED). Failed atomic checks indicate seats already held/sold, which require explicit cancellation flow with refunds.\n\nBoth operations write to the event log so analytics and reconciliation see the change. Mid-sale capacity changes are rare and operator-driven; they\'re never automated.' },
+      { question: 'How do you handle a presale that\'s only for fans of a specific artist?', answer: 'Standard mechanism: the user must hold a "fan token" — a credential issued by the platform after some signal of fandom (verified purchase of past tickets to that artist, registration via the artist\'s site, a partnership with a streaming service). The fan token is a JWT in the account, scoped to artist or tour.\n\nDuring the presale window, the seat API requires both an admission JWT (from the waiting room) and a fan token JWT for the artist. Without both, requests are rejected with a "presale only" message.\n\nFan tokens are not used outside of presales — for the general on-sale, anyone with an admission JWT can buy. The token system is mostly fairness theatre against bots: a bot can still buy from a token-holding account, but it can\'t buy from arbitrary throwaway accounts.' },
+      { question: 'What is "drop-out abandonment" and how do you handle it?', answer: 'When 2M people get admitted from the waiting room and 80% see they don\'t like the available seats and bail, the system has held 80% of inventory for 8 minutes and admitted a million people for nothing.\n\nMitigations:\n  • Show a few seat suggestions as the admission lands. Pre-filter by the user\'s declared preferences (price range, accessibility) so they\'re less likely to bail.\n  • Detect abandonment proactively — if a session is idle for >2 min after admission with no hold placed, release the admission JWT early and re-admit the next user in queue.\n  • Lock in commitment earlier — for premium events, require the user to declare ticket count and price tier before joining the queue. This makes the waiting room queue shorter for that pool and matches admissions to real demand.\n\nAbandonment is unavoidable but its rate is a metric you should observe and dampen.' },
+      { question: 'Why does this need its own design? Couldn\'t we just use a hotel booking system?', answer: 'Three differences in workload:\n  1. Hotel: a few rooms × a long calendar = small per-item contention spread over many dates. Ticketmaster: one event\'s 50K seats compete for the same 60-second window.\n  2. Hotel: inventory is independent (room 5 on July 14 is unrelated to room 5 on July 15). Ticketmaster: all seats in a section share a hot key in the hot path.\n  3. Hotel: bot scalping pressure is moderate. Ticketmaster: on-sales are the largest organised bot events on the consumer internet.\n\nA hotel system\'s row-level locking is fine at hotel scale; at on-sale scale it would lock up. A flash-sale system\'s single-counter atomic inventory works for one SKU; at 50K distinct seats it would need 50K counters and a totally different addressing model. Ticketmaster\'s hybrid — per-section hashes with seat-level CAS — is the synthesis.' },
+    ],
   },
 ];
