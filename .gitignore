@@ -15,5 +15,6 @@ _add-tier-anchors.mjs
 _layout-swap.mjs
 _panzoom-test.mjs
 _faq-screenshot.mjs
+_merge-worktrees.mjs
 _validate-worktree.mjs
 _*.mjs
